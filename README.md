@@ -1,6 +1,8 @@
 # TorrentCat Next
 
-A new macOS torrent-streaming app built with **Tauri 2, Rust, React and TypeScript**. The interface follows the local TorrentCat fork in `../webtorrent-desktop`: dark poster shelves, library filters, file lists, preferences and an integrated player. The new app has its own identity and profile.
+A macOS torrent-streaming app built with **Tauri 2, Rust, React and TypeScript**, featuring Eliaquín Encarnación's TorrentCat interface: dark poster shelves, library filters, file lists, preferences and an integrated player.
+
+**Open source under MIT, maintained by Eliaquín Encarnación. External contributions are not accepted.** You may use, study, modify and fork the project under its [license](LICENSE). Please read the [contribution policy](CONTRIBUTING.md) before opening an issue. Pull requests are disabled.
 
 Node is used to build the frontend; it is not shipped in the app. The installed app uses macOS WKWebView and a Rust torrent engine. VLC and FFmpeg are optional external native tools, not bundled runtimes.
 
@@ -9,6 +11,8 @@ Node is used to build the frontend; it is not shipped in the app. The installed 
 Requirements: macOS 13+, Apple command line developer tools, a current stable Rust toolchain and Node 22+ (or Node 24/26). The first build was made on Apple Silicon using Rust 1.99 and Node 26.
 
 ```sh
+git clone https://github.com/eliaquin/torrent-cat.git
+cd torrent-cat
 npm ci
 npm start
 ```
@@ -21,7 +25,7 @@ npm run bundle
 
 The result is `src-tauri/target/release/bundle/macos/TorrentCat Next.app`. The bundle command applies and verifies an ad-hoc signature. It can be copied to Applications and opened normally. This local build is not a notarized distribution release.
 
-On the development Mac, the release is installed at `/Applications/TorrentCat Next.app`. A generated 16-second test video remains in the new library, paused, for a quick playback check. The fixture is stored under `.local/smoke/` and is not part of the source repository.
+This repository currently provides source code for a macOS preview. There are no published binary releases. Linux and Windows support are planned for later.
 
 Checks:
 
@@ -56,7 +60,7 @@ Use an official freely redistributable torrent URL; the example release URL may 
 - Export torrent metadata, copy magnet, reveal in Finder, remove from library, or explicitly delete downloaded data.
 - Explicit import of the old fork's library and playback positions, starting paused, with duplicate-import protection.
 
-For broader video-format support install VLC 3 matching the Mac's architecture. FFmpeg/FFprobe are discovered under `/opt/homebrew/bin`, `/usr/local/bin`, or `/usr/bin`. Both VLC and FFmpeg were already available on the development Mac.
+For broader video-format support install VLC 3 matching the Mac's architecture. FFmpeg/FFprobe are discovered under `/opt/homebrew/bin`, `/usr/local/bin`, or `/usr/bin`.
 
 ## Library isolation and import
 
@@ -88,7 +92,7 @@ Development tests can isolate state using `TORRENTCAT_PROFILE=/absolute/test/pro
 | Media probing, posters, conversion | Rust-managed FFmpeg/FFprobe processes, two-job concurrency limit |
 | Subtitle encoding | `encoding_rs` and SRT-to-VTT conversion |
 | Embedded native playback | `libloading`, libVLC 3 and `objc2` NSView integration |
-| UI | React 19 / TypeScript / CSS based on the fork's design |
+| UI | React 19 / TypeScript / CSS using Eliaquín Encarnación's TorrentCat design |
 
 `src/main.tsx` owns library navigation and state, `settings.tsx` owns preferences and torrent creation, `player.tsx` owns playback, and `ui.tsx` provides shared controls. Rust services are in `src-tauri/src/{core,media,jobs,native}.rs`; `main.rs` wires commands and desktop integration.
 

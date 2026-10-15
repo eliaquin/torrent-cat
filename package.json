@@ -2,6 +2,11 @@
   "name": "torrent-cat",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eliaquin/torrent-cat.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
