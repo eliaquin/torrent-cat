@@ -108,4 +108,4 @@ The original research, alternatives and phased rollout are recorded in [the rebu
 
 ## Attribution
 
-The visual styling, application icon and Material Icons font were adapted/copied from the user's MIT-licensed local WebTorrent Desktop fork. Its copyright notice is retained in [LICENSE](LICENSE). Material Icons are provided under Apache 2.0; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Rust and npm dependencies retain their respective licenses.
+The visual styling and Material Icons font were adapted/copied from the user's MIT-licensed local WebTorrent Desktop fork. Its copyright notice is retained in [LICENSE](LICENSE). The application uses a new mint-teal cat and download-arrow icon generated for TorrentCat. Material Icons are provided under Apache 2.0; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Rust and npm dependencies retain their respective licenses.

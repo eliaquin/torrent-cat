@@ -2,7 +2,11 @@
 
 ## WebTorrent Desktop / local TorrentCat fork
 
-The library and preference styling, app icon, notification sounds and visual design originate in the user's local fork of WebTorrent Desktop (`../webtorrent-desktop`), baseline commit `86a5f8deef3dec27c78d8796e18ddf8231c26a05`. Its MIT notice is preserved in `LICENSE`. Notification WAV assets were converted to smaller AAC files in `public/sound/`.
+The library and preference styling, notification sounds and visual design originate in the user's local fork of WebTorrent Desktop (`../webtorrent-desktop`), baseline commit `86a5f8deef3dec27c78d8796e18ddf8231c26a05`. Its MIT notice is preserved in `LICENSE`. Notification WAV assets were converted to smaller AAC files in `public/sound/`.
+
+## TorrentCat application icon
+
+The mint-teal cat and download-arrow icon in `src-tauri/icons/` was generated for TorrentCat using OpenAI image generation. It replaces the inherited application icon. The PNG is the 1024-pixel master; the ICNS contains macOS icon sizes from 16 to 1024 pixels.
 
 ## Material Icons
 
