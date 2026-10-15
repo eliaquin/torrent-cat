@@ -75,7 +75,7 @@ The application identifier is `com.eliaquin.torrentcat.next`. Its files live und
   media-cache/          generated playback copies and subtitles
 ```
 
-Import is an optional, explicit action in Preferences. The source application's profile is not modified. Quit that application before importing because TorrentCat will reuse its download locations. Imported torrents are paused; resume verifies their files. Missing locations or metadata are reported individually. Import does not copy preferences, posters or engine resume bitfields.
+Import is an optional, explicit action in Preferences. Imported torrents are paused; resume verifies their files. Missing locations or metadata are reported individually. Import does not copy preferences, posters or engine resume bitfields.
 
 Development tests can isolate state using `TORRENTCAT_PROFILE=/absolute/test/profile`. `TORRENTCAT_OFFLINE=1` disables DHT, trackers, UPnP and local peer discovery and binds the peer listener to loopback. The media server always binds to loopback and requires unpredictable, revocable URLs.
 
