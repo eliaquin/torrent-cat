@@ -1,8 +1,10 @@
 # Third-party notices
 
-## WebTorrent Desktop / local TorrentCat fork
+## Notification sounds
 
-The library and preference styling, notification sounds and visual design originate in the user's local fork of WebTorrent Desktop (`../webtorrent-desktop`), baseline commit `86a5f8deef3dec27c78d8796e18ddf8231c26a05`. Its MIT notice is preserved in `LICENSE`. Notification WAV assets were converted to smaller AAC files in `public/sound/`.
+The eight AAC files in `public/sound/` were converted from WebTorrent Desktop's notification WAV assets, carried over through the local fork at commit `86a5f8deef3dec27c78d8796e18ddf8231c26a05`. The fork's sound history traces these assets to upstream WebTorrent Desktop contributors.
+
+Copyright (c) WebTorrent, LLC. The MIT notice for these sound assets is preserved in [licenses/WebTorrent-MIT.txt](licenses/WebTorrent-MIT.txt). This notice applies to the inherited sounds, not to Eliaquín Encarnación's TorrentCat UI design or the new application as a whole.
 
 ## TorrentCat application icon
 
@@ -10,7 +12,7 @@ The mint-teal cat and download-arrow icon in `src-tauri/icons/` was generated fo
 
 ## Material Icons
 
-`public/MaterialIcons-Regular.woff2` is the Material Icons font from that fork.
+`public/MaterialIcons-Regular.woff2` is Google’s Material Icons font.
 
 Copyright Google LLC. Licensed under the Apache License, Version 2.0.
 

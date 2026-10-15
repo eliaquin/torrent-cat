@@ -106,6 +106,10 @@ This is a working local macOS preview, not a claim of complete WebTorrent compat
 
 The original research, alternatives and phased rollout are recorded in [the rebuild plan](docs/TAURI-REBUILD-PLAN.md). That document predates this implementation; this README describes the local preview.
 
-## Attribution
+## License and acknowledgments
 
-The visual styling and Material Icons font were adapted/copied from the user's MIT-licensed local WebTorrent Desktop fork. Its copyright notice is retained in [LICENSE](LICENSE). The application uses a new mint-teal cat and download-arrow icon generated for TorrentCat. Material Icons are provided under Apache 2.0; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Rust and npm dependencies retain their respective licenses.
+TorrentCat and its UI design are by Eliaquín Encarnación. The project is licensed under [MIT](LICENSE).
+
+Thanks to WebTorrent Desktop for inspiring this project. TorrentCat uses Tauri and Rust with librqbit as its torrent engine.
+
+The application icon was generated for TorrentCat. The current notification sounds were carried over from WebTorrent Desktop, and the Material Icons font is provided by Google under Apache 2.0. Notices for these assets are scoped in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md); Rust and npm dependencies retain their respective licenses.
