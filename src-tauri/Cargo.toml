@@ -1,0 +1,51 @@
+[package]
+name = "torrent-cat"
+version = "0.1.0"
+description = "TorrentCat streaming torrent client"
+authors = ["Eliaquin"]
+edition = "2024"
+license = "MIT"
+default-run = "torrent-cat"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-deep-link = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-notification = "2"
+librqbit = { version = "=9.0.1", default-features = false, features = ["rust-tls"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+axum = "0.8"
+async-stream = "0.3"
+futures-core = "0.3"
+uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
+notify = "8"
+lava_torrent = "0.11"
+encoding_rs = "0.8"
+libloading = "0.9"
+sha2 = "0.10"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
+objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow"] }
+
+[dev-dependencies]
+tempfile = "3"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

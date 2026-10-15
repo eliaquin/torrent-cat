@@ -1,0 +1,65 @@
+# Local validation — October 15, 2026
+
+Target: Apple Silicon macOS; Rust 1.99.0; Node 26.3.0. Built application version 0.1.0, identifier `com.eliaquin.torrentcat.next`.
+
+## Automated checks
+
+- TypeScript typecheck and Vite production build: passed.
+- Rust debug compilation and optimized release compilation: passed.
+- `npm test`: **12 passed, 0 failed** (local suite); the public-network smoke test is separate and ignored by default. FFmpeg was available, so the optional media integration test ran rather than skipping.
+- Strict ad-hoc signature verification of `/Applications/TorrentCat Next.app`: passed.
+- Release bundle reported by Tauri: **17.52 MiB**.
+
+The Rust tests cover:
+
+1. Input/address normalization and rejection of unsupported protocols.
+2. Atomic JSON profile writes and previous-version backup.
+3. HTTP range boundaries, suffix ranges and malformed/multiple-range rejection.
+4. SRT timestamp conversion.
+5. Two local torrent sessions: creation, seeding, direct-peer transfer, exact late-range bytes, HEAD, foreign-origin rejection, invalid-range response, selection, pause/revocation, resume, restart recovery and remove-without-delete.
+6. Duplicate addition and multi-file root-folder preservation, including creation without trackers.
+7. Synthetic legacy import: custom metadata filename, paused initial state, original paths, playback positions, repeated-import idempotency and unchanged legacy config/source files.
+8. Generated MKV/AC3 media: FFprobe, JPEG poster, MP4 playback copy, unchanged original bytes and UTF-16 SRT decoding/serving.
+
+9. Playback priority: complete playback leaves other transfers running; incomplete playback pauses competitors; close restores only automatic pauses; manual pause overrides restoration; restart recovers journaled pauses.
+10. Real macOS watched-folder events: existing files are ignored, incomplete copies are retried without premature errors, and a subsequent completed file is added. Includes canonical `/var`/`/private/var` path handling.
+11. Completion notifications: first observation establishes a baseline; only new incomplete-to-complete transitions notify; duplicate polls and re-added completed seeds do not.
+12. Launch inbox: queued cold-start inputs, file-URL normalization, frontend readiness and duplicate native-event suppression.
+
+## Public-network smoke check
+
+Ran the opt-in `public_swarm_download_smoke` test against Debian's official `debian-13.7.0-amd64-netinst.iso.torrent`. The Rust engine received **2,097,152 verified bytes** out of 792,723,456 total in a **3.61-second** test run, then stopped the session and removed its temporary files. The test passed. This proves one conventional public swarm path, not every tracker or NAT configuration. Source: [Debian torrent downloads](https://www.debian.org/CD/torrent-cd/).
+
+## Installed app checks
+
+Used the actual native Tauri window through macOS accessibility and screenshots:
+
+- Launched the debug build, then the installed optimized app from `/Applications/TorrentCat Next.app`.
+- Created a private torrent from a generated MP4 through the native file/save dialogs, with a loopback-only test tracker.
+- Observed seeding at 100%, file progress, pause/resume controls, and a persisted library after restart.
+- Played the generated MP4 in the built-in WKWebView player; observed decoded video and advancing time.
+- Verified saved playback position and restart-from-beginning behavior for a completed video.
+- Switched to embedded VLC in the installed release; observed decoded video, advancing time and audio-track controls. Paused and entered/exited fullscreen.
+- Returned to the library and left the test torrent paused.
+- Inspected preferences and detected installed VLC/FFmpeg/FFprobe. After updating the release, confirmed that Prioritize streaming and Notification sounds default on, and optional completion notifications default off.
+
+The original fork's Git working tree remained clean. Its profile was not imported or edited. Only synthetic data was used for import testing.
+
+## Limits of these checks
+
+This does not certify every public swarm/tracker/NAT configuration, arbitrary codecs, external player automation, autostart, macOS notification delivery under all system settings, Mac system-default associations, Intel builds, older macOS versions, or Linux/Windows. WebRTC/browser peers are unsupported. Full parity and distribution work is listed in the README and rebuild plan.
+
+
+## Original request audit
+
+| Requirement | Current evidence |
+| --- | --- |
+| Use the local fork as the reference | Plan identifies the inspected local path, commit and dependency inventory; original working tree remains clean. |
+| Research Rust equivalents and assess Tauri | Rebuild plan includes framework comparison, runtime-library replacement table, primary sources, compatibility gaps and implementation phases. |
+| Build a fresh app with less runtime baggage | New Rust/Tauri project, new TypeScript UI, own profile and app identifier. Installed bundle contains the executable, icon, plist and signature; no Node or Electron runtime. Installed folder is about 17 MiB versus 350 MiB for the existing TorrentCat installation (disk usage, not a memory/performance benchmark). |
+| Preserve the interface | Existing fork's dark shelf and preference styling/assets retained; rendered native-window checks show library, search/status filters, cards, file list, preferences and integrated playback. |
+| Preserve functionality as closely as possible | Implemented torrent and playback flows are listed above, with local and public-network evidence. Remaining differences are explicitly listed in README: browser/WebRTC peers lack a verified equivalent in the chosen Rust engine, optional media tools remain external, and some desktop/distribution conveniences are follow-up work. No claim of exact WebTorrent wire compatibility. |
+| Start with this Mac; other platforms later | Optimized Apple Silicon macOS bundle installed and running from `/Applications/TorrentCat Next.app`; strict ad-hoc signature verification passed. Intel/older OS, Windows and Linux are not claimed tested. |
+| Go from the beginning to running locally | Build commands and source are present; installed binary SHA-256 matches the built binary (`52de9c507154aca0e5e4f1d0a060e88039a4c2d366804c0d5cd48420b9e12980`); updated app visibly launches with the preserved test library. |
+
+This audit establishes the requested local Mac app and researched implementation, with the documented approximations allowed by the original “same or as close as possible” requirement. It does not treat later public distribution or exact protocol parity as completed.
