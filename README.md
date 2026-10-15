@@ -1,6 +1,6 @@
 # TorrentCat Next
 
-A macOS torrent-streaming app built with **Tauri 2, Rust, React and TypeScript**, featuring Eliaquín Encarnación's TorrentCat interface: dark poster shelves, library filters, file lists, preferences and an integrated player.
+A new macOS torrent-streaming application built from scratch with **Tauri 2, Rust, React and TypeScript**, featuring Eliaquín Encarnación's TorrentCat interface: dark poster shelves, library filters, file lists, preferences and an integrated player.
 
 **Open source under MIT, maintained by Eliaquín Encarnación. External contributions are not accepted.** You may use, study, modify and fork the project under its [license](LICENSE). Please read the [contribution policy](CONTRIBUTING.md) before opening an issue. Pull requests are disabled.
 
@@ -58,7 +58,7 @@ Use an official freely redistributable torrent URL; the example release URL may 
 - Notification sounds and optional macOS completion notifications. Desktop alerts are off by default and can be enabled in General preferences; macOS notification settings also apply.
 - File/protocol launch inputs are queued until the frontend listeners are ready and deduplicated across native launch events.
 - Export torrent metadata, copy magnet, reveal in Finder, remove from library, or explicitly delete downloaded data.
-- Explicit import of the old fork's library and playback positions, starting paused, with duplicate-import protection.
+- Optional import of a compatible existing library and playback positions, starting paused, with duplicate-import protection.
 
 For broader video-format support install VLC 3 matching the Mac's architecture. FFmpeg/FFprobe are discovered under `/opt/homebrew/bin`, `/usr/local/bin`, or `/usr/bin`.
 
@@ -75,11 +75,11 @@ The application identifier is `com.eliaquin.torrentcat.next`. Its files live und
   media-cache/          generated playback copies and subtitles
 ```
 
-The original fork and `~/Library/Application Support/WebTorrent` are not modified. Import is an explicit action in Preferences. Quit the original app before importing because the new app will reuse its download locations. Imported torrents are paused; resume verifies their files. Missing locations or metadata are reported individually. Import does not copy old preferences, posters or engine resume bitfields.
+Import is an optional, explicit action in Preferences. The source application's profile is not modified. Quit that application before importing because TorrentCat will reuse its download locations. Imported torrents are paused; resume verifies their files. Missing locations or metadata are reported individually. Import does not copy preferences, posters or engine resume bitfields.
 
 Development tests can isolate state using `TORRENTCAT_PROFILE=/absolute/test/profile`. `TORRENTCAT_OFFLINE=1` disables DHT, trackers, UPnP and local peer discovery and binds the peer listener to loopback. The media server always binds to loopback and requires unpredictable, revocable URLs.
 
-## Architecture and replacements
+## Architecture
 
 | Responsibility | Implementation |
 | --- | --- |
@@ -96,11 +96,11 @@ Development tests can isolate state using `TORRENTCAT_PROFILE=/absolute/test/pro
 
 `src/main.tsx` owns library navigation and state, `settings.tsx` owns preferences and torrent creation, `player.tsx` owns playback, and `ui.tsx` provides shared controls. Rust services are in `src-tauri/src/{core,media,jobs,native}.rs`; `main.rs` wires commands and desktop integration.
 
-## Remaining parity and release work
+## Current limitations and planned work
 
-This is a working local macOS preview, not a claim of complete WebTorrent compatibility:
+TorrentCat is currently a working macOS preview with these limitations and planned improvements:
 
-- **WebRTC/browser-only peers are not supported.** The engine uses conventional BitTorrent peers. Web seeds, NAT-PMP and every tracker/network configuration have not been certified against the fork.
+- **WebRTC/browser-only peers are not supported.** The engine uses conventional BitTorrent peers. Web seeds, NAT-PMP and broader tracker/network configurations need further validation.
 - The built-in player depends on WKWebView codec support. MP4 conversion copies the video track and converts audio; unsupported video codecs still require VLC. Embedded bitmap subtitles are not converted to text.
 - Posters and metadata extraction wait for a complete file. Generated cache files currently require manual cleanup if disk space is needed.
 - Torrent creation supports one file or one folder, rather than arbitrary files drawn from multiple folders.
@@ -108,12 +108,12 @@ This is a working local macOS preview, not a claim of complete WebTorrent compat
 - Watch-folder ingestion retries stable but invalid metadata for approximately 30 seconds. Later file changes trigger a new attempt; permanently malformed metadata reports an error.
 - Later work: Intel and oldest-supported-macOS testing, signed/notarized packaging, broader network/media regression tests, and Linux/Windows adapters. The current native player module is macOS-specific.
 
-The original research, alternatives and phased rollout are recorded in [the rebuild plan](docs/TAURI-REBUILD-PLAN.md). That document predates this implementation; this README describes the local preview.
+The initial research, technology choices and phased rollout are recorded in [the development plan](docs/TAURI-REBUILD-PLAN.md). That historical document predates this implementation; this README describes the current application.
 
 ## License and acknowledgments
 
 TorrentCat and its UI design are by Eliaquín Encarnación. The project is licensed under [MIT](LICENSE).
 
-Thanks to WebTorrent Desktop for inspiring this project. TorrentCat uses Tauri and Rust with librqbit as its torrent engine.
+Thanks to WebTorrent Desktop for inspiring this project.
 
-The application icon was generated for TorrentCat. The current notification sounds were carried over from WebTorrent Desktop, and the Material Icons font is provided by Google under Apache 2.0. Notices for these assets are scoped in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md); Rust and npm dependencies retain their respective licenses.
+The application icon was generated for TorrentCat. Notification sound and Material Icons font credits are recorded in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md); Rust and npm dependencies retain their respective licenses.
