@@ -85,14 +85,19 @@ test("fullscreen playback hides controls after two seconds of inactivity", () =>
   assert.equal(shouldHideControls({ ...playing, now: 9000, lastActivity: 8999 }), false);
 });
 
-test("windowed playback never hides its controls", () => {
-  assert.equal(shouldHideControls({ ...playing, fullscreen: false, now: 9000 }), false);
+test("windowed playback hides controls after two seconds and reveals them on activity", () => {
+  const windowed = { ...playing, fullscreen: false };
+  assert.equal(shouldHideControls({ ...windowed, now: 1000 + CONTROL_IDLE_MS - 1 }), false);
+  assert.equal(shouldHideControls({ ...windowed, now: 1000 + CONTROL_IDLE_MS }), true);
+  assert.equal(shouldHideControls({ ...windowed, now: 9000, lastActivity: 8999 }), false);
 });
 
 for (const reason of ["paused", "blocked", "hovered", "focused", "dragging"]) {
-  test(`controls stay accessible while ${reason}`, () => {
-    assert.equal(shouldHideControls({ ...playing, now: 9000, [reason]: true }), false);
-  });
+  for (const fullscreen of [true, false]) {
+    test(`${fullscreen ? "fullscreen" : "windowed"} controls stay accessible while ${reason}`, () => {
+      assert.equal(shouldHideControls({ ...playing, fullscreen, now: 9000, [reason]: true }), false);
+    });
+  }
 }
 
 test("VLC preference falls back when unavailable and resumes when installed", () => {

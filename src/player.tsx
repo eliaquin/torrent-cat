@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Playing, Snapshot, clock } from "./types";
+import { Playing, Snapshot, bytes, clock } from "./types";
 import { Button, Icon } from "./ui";
 import { createVideoClickHandler, handlePlayerEscape, resolvePlaybackEngine } from "./player-controls";
 import { TrackMenu } from "./track-menu";
@@ -15,6 +15,8 @@ type NativeStatus = {
   time: number;
   duration: number;
   state: number;
+  width: number;
+  height: number;
   audio: Track[];
   subtitles: Track[];
   audioTrack: number;
@@ -51,6 +53,7 @@ export function Player({
     [paused, setPaused] = useState(false),
     [time, setTime] = useState(0),
     [duration, setDuration] = useState(0),
+    [videoSize, setVideoSize] = useState({ width: 0, height: 0 }),
     [volume, setVolume] = useState(1),
     [rate, setRate] = useState(1),
     [subtitle, setSubtitle] = useState(""),
@@ -60,11 +63,12 @@ export function Player({
     [audioTrack, setAudioTrack] = useState<number | null>(null),
     [audioMenuOpen, setAudioMenuOpen] = useState(false),
     [subtitleMenuOpen, setSubtitleMenuOpen] = useState(false),
+    [speedMenuOpen, setSpeedMenuOpen] = useState(false),
     [subtitleTrack, setSubtitleTrack] = useState(-1),
     [subtitleFile, setSubtitleFile] = useState<{ url: string; name: string } | null>(null),
     [subtitleWorking, setSubtitleWorking] = useState(false);
   const presentation = usePlayerPresentation(
-    paused, !!message || working || !url || engine === "external" || audioMenuOpen || subtitleMenuOpen || subtitleWorking,
+    paused, !!message || working || !url || engine === "external" || audioMenuOpen || subtitleMenuOpen || speedMenuOpen || subtitleWorking,
     engine === "vlc" && !!url && native !== null && !failed, report,
   );
   const video = useRef<HTMLVideoElement>(null),
@@ -77,6 +81,10 @@ export function Player({
     nativeReady = useRef(false),
     subtitleRequest = useRef(0);
   const torrent = data.torrents.find((t) => t.id === playing.id);
+  const download = torrent?.stats?.state === "live" && !torrent.stats.finished ? torrent.stats : null;
+  const downloadPercent = download && download.total_bytes > 0
+    ? Math.max(0, Math.min(100, Math.floor(download.progress_bytes / download.total_bytes * 100)))
+    : 0;
   const file = torrent?.files?.[playing.index];
   const complete =
     !!file &&
@@ -137,6 +145,7 @@ export function Player({
     setPaused(false);
     setTime(0);
     setDuration(0);
+    setVideoSize({ width: 0, height: 0 });
     position.current =
       data.profile.positions[`${playing.hash}:${playing.index}`] || 0;
     void (async () => {
@@ -164,6 +173,7 @@ export function Player({
     };
   }, [playing.id, playing.index]);
   useEffect(() => {
+    setVideoSize({ width: 0, height: 0 });
     if (!url) return;
     const gen = ++session.current;
     nativeReady.current = false;
@@ -236,6 +246,7 @@ export function Player({
           });
           if (live) {
             setNative(s);
+            setVideoSize((old) => old.width === s.width && old.height === s.height ? old : { width: s.width, height: s.height });
             setTime(s.time);
             setDuration(s.duration);
             position.current = s.time;
@@ -259,6 +270,12 @@ export function Player({
       clearTimeout(timer);
     };
   }, [engine, playing.id, playing.index]);
+  useEffect(() => {
+    void invoke("fit_video_window", videoSize).catch(report);
+  }, [videoSize, presentation.fullscreen, report]);
+  useEffect(() => () => {
+    void invoke("fit_video_window", { width: 0, height: 0 }).catch(report);
+  }, [report]);
   useEffect(() => {
     if (time - lastSaved.current > 5 || time < lastSaved.current - 2) {
       lastSaved.current = time;
@@ -447,6 +464,7 @@ export function Player({
             crossOrigin="anonymous"
             onLoadedMetadata={() => {
               if (video.current) {
+                setVideoSize({ width: video.current.videoWidth, height: video.current.videoHeight });
                 setDuration(video.current.duration);
                 if (position.current >= video.current.duration - 1)
                   position.current = 0;
@@ -455,6 +473,9 @@ export function Player({
                 video.current.playbackRate = rate;
                 setMessage("");
               }
+            }}
+            onResize={() => {
+              if (video.current) setVideoSize({ width: video.current.videoWidth, height: video.current.videoHeight });
             }}
             onTimeUpdate={() => {
               const t = video.current?.currentTime || 0;
@@ -542,9 +563,23 @@ export function Player({
               onClick={() => onNext(-1)}
             />
             <Button
+              icon="replay_10"
+              title="Back 10 seconds"
+              aria-label="Back 10 seconds"
+              disabled={!Number.isFinite(duration) || duration <= 0 || engine === "external"}
+              onClick={() => seek(position.current - 10)}
+            />
+            <Button
               icon={paused ? "play_arrow" : "pause"}
               title={paused ? "Play" : "Pause"}
               onClick={toggle}
+            />
+            <Button
+              icon="forward_10"
+              title="Forward 10 seconds"
+              aria-label="Forward 10 seconds"
+              disabled={!Number.isFinite(duration) || duration <= 0 || engine === "external"}
+              onClick={() => seek(position.current + 10)}
             />
             <Button
               icon="skip_next"
@@ -568,23 +603,27 @@ export function Player({
               else if (video.current) video.current.volume = v;
             }}
           />
-          <select
-            aria-label="Playback speed"
-            value={rate}
-            onChange={(e) => {
-              const r = Number(e.target.value);
+          <TrackMenu
+            label="Playback speed"
+            className="playback-speed-control"
+            triggerLabel={`${rate}×`}
+            tracks={[0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 4, 8, 16].map((r) => ({
+              id: r, name: `${r}×`, detail: r === 1 ? "Normal" : undefined,
+            }))}
+            selected={rate}
+            onOpenChange={setSpeedMenuOpen}
+            onSelect={(r) => {
               setRate(r);
               if (engine === "vlc") void control("rate", r);
               else if (video.current) video.current.playbackRate = r;
             }}
-          >
-            {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 4, 8, 16].map((r) => (
-              <option key={r} value={r}>
-                {r}×
-              </option>
-            ))}
-          </select>
+          />
           <div className="player-spacer" />
+          {download && (
+            <span className="player-download" title="Torrent download speed and progress">
+              ↓ {bytes((download.live?.download_speed.mbps || 0) * 1024 * 1024)}/s · {downloadPercent}%
+            </span>
+          )}
           {engine === "vlc" && native?.audio.length ? (
             <TrackMenu
               label="Audio" icon="headset"
