@@ -7,8 +7,8 @@ Las referencias de líneas de la auditoría describen el commit base, no el cód
 | Hallazgo | Estado | Evidencia |
 | --- | --- | --- |
 | F1 — aislamiento de archivos | Integrado en `df35676` y publicado; 35 pruebas pasan, 1 ignorada | `tests/storage_confinement.rs` |
-| F2 — asociación de respuestas UDP | Implementado y revisado; validación local | Pruebas UDP del crate y `tracker_tests` |
-| F3 — límites de entradas | Pendiente | |
+| F2 — asociación de respuestas UDP | Integrado en `eb6252f` y publicado | Pruebas UDP del crate y `tracker_tests` |
+| F3 — límites de entradas | Implementado, revisado y validado | Parser, cuerpos HTTP, URL y tracker locales |
 | F4 — integridad y durabilidad de reanudación | Pendiente | |
 | F5 — capacidad, cancelación y equidad de subida | Pendiente | |
 | F6 — niveles y failover de trackers | Pendiente | |
@@ -41,3 +41,13 @@ Self-review: mantener el ID reservado hasta que desaparezca su guard evita que l
 Regresiones: IP/puerto/acción incorrectos, mensaje truncado, respuesta legítima posterior, ID desconocido, duplicado/tardío, reserva/reutilización y cancelación. Pruebas de socket reales en loopback IPv4 e IPv6. Referencia: [BEP 15](https://www.bittorrent.org/beps/bep_0015.html).
 
 Validación final F2: `cargo test --manifest-path src-tauri/Cargo.toml --locked -p librqbit-tracker-comms --lib` — 7 pasan, 1 de red pública ignorada. `cargo test --manifest-path src-tauri/Cargo.toml --locked tracker_tests` — 9 pasan. Diff revisado sin hallazgos bloqueantes; `git diff --check` pasa.
+
+## F3: presupuestos de entradas
+
+Se vendoriza `librqbit-bencode` 9.0.1 (mismo commit upstream que el motor) para que las restricciones también cubran DHT, extensiones, metainfo, campos desconocidos y deserializadores directos. Presupuestos: 32 MiB de entrada bencode/metadata, 64 contenedores anidados y 1.000.000 de valores; las cadenas quedan limitadas por el presupuesto total. Conversión numérica comprobada, sin overflow ni acceso `unsafe` al extraer cadenas. Son límites de representación/trabajo, no una afirmación sobre el RSS total del proceso.
+
+El tracker admite cuerpos HTTP de hasta 1 MiB, 2.000 peers por respuesta y un ID de hasta 4 KiB. HTTP se lee por fragmentos, sin reservar memoria a partir de Content-Length. Las descargas de metadata por URL tienen además un plazo de 30 s. Las lecturas locales/ stdin se detienen en el límite más un byte para detectar exceso. Los deadlines de anuncios usan suma comprobada y las respuestas inválidas siguen el backoff normal.
+
+Self-review: además de las rutas de red, la lectura de `Core::add` comprobaba tamaño y luego leía sin límite, con una carrera si el archivo crecía. Ahora la lectura también queda acotada. Se conserva la compatibilidad de bencode con datos binarios tras un encabezado mediante `from_bytes_with_rest`, pero HTTP exige consumir toda la respuesta. La validación de intervalos ocurre antes de dar por exitoso el anuncio; una prueba recupera un tracker que primero devuelve `u64::MAX` y después una respuesta válida.
+
+Validación: 21 pruebas de bencode y 10 de tracker pasan (1 de red pública ignorada); 30 pruebas de aplicación y 6 de almacenamiento pasan (1 pública ignorada), más la prueba de URL excesiva seguida de URL válida. Cuerpos chunked, EOF, longitud falsa/truncada, límite exacto y exceso; profundidad 50.000, campos ignorados, límite de valores, tamaños de cadena falsos y extremos numéricos. Clippy de bencode y tracker con `-D warnings` pasa. Diff contra las fuentes originales y el código de aplicación revisado sin hallazgos bloqueantes.

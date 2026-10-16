@@ -58,3 +58,4 @@ strip = false
 [patch.crates-io]
 librqbit = { path = "vendor/librqbit" }
 librqbit-tracker-comms = { path = "vendor/librqbit-tracker-comms" }
+librqbit-bencode = { path = "vendor/librqbit-bencode" }

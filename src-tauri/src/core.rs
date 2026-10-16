@@ -197,7 +197,20 @@ impl Core {
             if meta.len() > 32 * 1024 * 1024 {
                 bail!("Torrent metadata is too large");
             }
-            AddTorrent::TorrentFileBytes(tokio::fs::read(&address).await?.into())
+            use tokio::io::AsyncReadExt;
+            if !meta.is_file() {
+                bail!("Torrent metadata must be a regular file");
+            }
+            let mut bytes = Vec::new();
+            tokio::fs::File::open(&address)
+                .await?
+                .take(32 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .await?;
+            if bytes.len() > 32 * 1024 * 1024 {
+                bail!("Torrent metadata is too large");
+            }
+            AddTorrent::TorrentFileBytes(bytes.into())
         } else {
             AddTorrent::Url(address.into())
         };
