@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Playing, Snapshot, clock } from "./types";
 import { Button, Icon } from "./ui";
@@ -99,8 +100,22 @@ export function Player({
     }).catch(report);
   };
   useEffect(() => {
-    surface.current?.focus({ preventScroll: true });
-  }, [presentation.fullscreen]);
+    let active = true;
+    const focus = () => {
+      if (!active) return;
+      void getCurrentWebview().setFocus().then(() => {
+        if (active) surface.current?.focus({ preventScroll: true });
+      }).catch(report);
+    };
+    // Tauri emits a native resize when the fullscreen animation finishes.
+    // Restore the webview's first responder then, not during the transition.
+    const unlisten = getCurrentWindow().onResized(focus);
+    focus();
+    return () => {
+      active = false;
+      void unlisten.then((stop) => stop()).catch(report);
+    };
+  }, [report]);
   useEffect(() => {
     const gen = ++generation.current;
     session.current++;
