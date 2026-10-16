@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Playing, Snapshot, clock } from "./types";
 import { Button, Icon } from "./ui";
-import { createVideoClickHandler, resolvePlaybackEngine } from "./player-controls";
+import { createVideoClickHandler, handlePlayerEscape, resolvePlaybackEngine } from "./player-controls";
 import { TrackMenu } from "./track-menu";
 import { DownloadMap } from "./download-map";
 import { usePlayerPresentation } from "./use-player-presentation";
@@ -271,8 +272,9 @@ export function Player({
     if (engine === "vlc") void control("seek", t);
     else if (video.current) video.current.currentTime = t;
   };
-  const keyHandler = useRef({ toggle, seek, time, onNext, presentation });
-  keyHandler.current = { toggle, seek, time, onNext, presentation };
+  const escapePending = useRef(false);
+  const keyHandler = useRef({ toggle, seek, time, onNext, onBack, presentation, report });
+  keyHandler.current = { toggle, seek, time, onNext, onBack, presentation, report };
   const videoClick = useMemo(
     () => createVideoClickHandler(() => keyHandler.current.toggle()),
     [],
@@ -281,9 +283,16 @@ export function Player({
   useEffect(() => {
     const listener = (e: KeyboardEvent) => {
       const h = keyHandler.current;
-      if (e.key === "Escape" && h.presentation.fullscreen) {
+      if (e.key === "Escape") {
         e.preventDefault();
-        void h.presentation.changeFullscreen(false);
+        if (e.repeat || escapePending.current) return;
+        escapePending.current = true;
+        void handlePlayerEscape({
+          fullscreen: h.presentation.fullscreen,
+          isFullscreen: () => getCurrentWindow().isFullscreen(),
+          exitFullscreen: () => h.presentation.changeFullscreen(false),
+          back: h.onBack,
+        }).catch(h.report).finally(() => { escapePending.current = false; });
         return;
       }
       if (

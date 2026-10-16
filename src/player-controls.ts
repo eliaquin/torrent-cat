@@ -1,5 +1,20 @@
 export const CONTROL_IDLE_MS = 2000;
 
+export async function handlePlayerEscape(actions: {
+  fullscreen: boolean;
+  isFullscreen: () => Promise<boolean>;
+  exitFullscreen: () => Promise<void>;
+  back: () => void;
+}) {
+  // The rendered state covers macOS starting an exit before its query returns;
+  // the native query covers entry before the fullscreen poll updates the UI.
+  if (actions.fullscreen || await actions.isFullscreen()) {
+    await actions.exitFullscreen();
+  } else {
+    actions.back();
+  }
+}
+
 export function createVideoClickHandler(toggle: () => void) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const cancel = () => {

@@ -1,6 +1,44 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { shouldHideControls, CONTROL_IDLE_MS, resolvePlaybackEngine, createVideoClickHandler } from "../src/player-controls.ts";
+import { shouldHideControls, CONTROL_IDLE_MS, resolvePlaybackEngine, createVideoClickHandler, handlePlayerEscape } from "../src/player-controls.ts";
+
+test("Escape exits fullscreen first, then leaves windowed playback", async () => {
+  let fullscreen = true;
+  const calls = [];
+  const actions = {
+    isFullscreen: async () => fullscreen,
+    exitFullscreen: async () => { calls.push("exit-fullscreen"); fullscreen = false; },
+    back: () => calls.push("back"),
+  };
+  await handlePlayerEscape({ ...actions, fullscreen });
+  assert.deepEqual(calls, ["exit-fullscreen"]);
+  await handlePlayerEscape({ ...actions, fullscreen });
+  assert.deepEqual(calls, ["exit-fullscreen", "back"]);
+});
+
+for (const [rendered, native] of [[false, true], [true, false]]) {
+  test(`Escape stays in the video during a fullscreen transition (${rendered}/${native})`, async () => {
+    const calls = [];
+    await handlePlayerEscape({
+      fullscreen: rendered,
+      isFullscreen: async () => native,
+      exitFullscreen: async () => { calls.push("exit-fullscreen"); },
+      back: () => calls.push("back"),
+    });
+    assert.deepEqual(calls, ["exit-fullscreen"]);
+  });
+}
+
+test("a failed fullscreen query does not leave playback", async () => {
+  const calls = [];
+  await assert.rejects(handlePlayerEscape({
+    fullscreen: false,
+    isFullscreen: async () => { throw new Error("Window unavailable"); },
+    exitFullscreen: async () => { calls.push("exit-fullscreen"); },
+    back: () => calls.push("back"),
+  }), /Window unavailable/);
+  assert.deepEqual(calls, []);
+});
 
 test("single video clicks toggle playback", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });

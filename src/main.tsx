@@ -192,6 +192,8 @@ function App() {
       const target = e.target as HTMLElement;
       if (["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
       if (e.key === "Escape") {
+        // The player owns Escape: fullscreen first, then back to the library.
+        if (current.current.page === "player") return;
         setModal(null);
         setMore(null);
         if (current.current.page !== "home") void actions.current.back();
