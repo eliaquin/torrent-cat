@@ -1206,7 +1206,9 @@ html.native-playback,
   margin: 0;
 }
 .download-progress {
-  width: 100%;
+  /* Inset the thin line to visually align with the seek track's rounded caps. */
+  width: calc(100% - 6px);
+  margin-inline: 3px;
   height: 2px;
   appearance: none;
   border: 0;

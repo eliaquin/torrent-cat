@@ -1,5 +1,25 @@
 export const CONTROL_IDLE_MS = 2000;
 
+export function createVideoClickHandler(toggle: () => void) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const cancel = () => {
+    clearTimeout(timer);
+    timer = undefined;
+  };
+  return {
+    cancel,
+    click(detail: number) {
+      cancel();
+      // Let the second click claim the gesture for fullscreen.
+      if (detail > 1) return;
+      timer = setTimeout(() => {
+        timer = undefined;
+        toggle();
+      }, 300);
+    },
+  };
+}
+
 export function resolvePlaybackEngine(
   preferred: "builtin" | "vlc" | "external",
   vlcAvailable: boolean,

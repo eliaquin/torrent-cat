@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Playing, Snapshot, clock, bytes } from "./types";
 import { Button, Icon } from "./ui";
-import { resolvePlaybackEngine } from "./player-controls";
+import { createVideoClickHandler, resolvePlaybackEngine } from "./player-controls";
 import { TrackMenu } from "./track-menu";
 import { usePlayerPresentation } from "./use-player-presentation";
 type Track = { id: number; name: string };
@@ -272,6 +272,11 @@ export function Player({
   };
   const keyHandler = useRef({ toggle, seek, time, onNext, presentation });
   keyHandler.current = { toggle, seek, time, onNext, presentation };
+  const videoClick = useMemo(
+    () => createVideoClickHandler(() => keyHandler.current.toggle()),
+    [],
+  );
+  useEffect(() => () => videoClick.cancel(), [videoClick, playing.id, playing.index, engine, url]);
   useEffect(() => {
     const listener = (e: KeyboardEvent) => {
       const h = keyHandler.current;
@@ -395,8 +400,15 @@ export function Player({
       </div>
       <div
         className="video-surface" ref={surface} tabIndex={0}
-        aria-label="Video; double-click or press F to toggle fullscreen"
-        onDoubleClick={() => void presentation.changeFullscreen()}
+        aria-label="Video; click or press Space to play or pause; double-click or press F to toggle fullscreen"
+        onClick={(event) => {
+          if (url && !failed && (engine === "builtin" || nativeReady.current))
+            videoClick.click(event.detail);
+        }}
+        onDoubleClick={() => {
+          videoClick.cancel();
+          void presentation.changeFullscreen();
+        }}
       >
         {engine === "builtin" && url ? (
           <video

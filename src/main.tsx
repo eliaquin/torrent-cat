@@ -645,7 +645,6 @@ function App() {
             data={data}
             refresh={refresh}
             report={report}
-            importLibrary={() => setModal("import")}
           />
         ) : page === "create" ? (
           <Create

@@ -1,6 +1,40 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { shouldHideControls, CONTROL_IDLE_MS, resolvePlaybackEngine } from "../src/player-controls.ts";
+import { shouldHideControls, CONTROL_IDLE_MS, resolvePlaybackEngine, createVideoClickHandler } from "../src/player-controls.ts";
+
+test("single video clicks toggle playback", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let paused = false;
+  const handler = createVideoClickHandler(() => { paused = !paused; });
+  handler.click(1);
+  t.mock.timers.tick(300);
+  assert.equal(paused, true);
+  handler.click(1);
+  t.mock.timers.tick(300);
+  assert.equal(paused, false);
+});
+
+test("double-clicking for fullscreen does not toggle playback", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const toggle = t.mock.fn();
+  const handler = createVideoClickHandler(toggle);
+  handler.click(1);
+  t.mock.timers.tick(100);
+  handler.click(2);
+  handler.cancel();
+  t.mock.timers.tick(500);
+  assert.equal(toggle.mock.callCount(), 0);
+});
+
+test("leaving the video cancels pending playback clicks", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const toggle = t.mock.fn();
+  const handler = createVideoClickHandler(toggle);
+  handler.click(1);
+  handler.cancel();
+  t.mock.timers.tick(500);
+  assert.equal(toggle.mock.callCount(), 0);
+});
 
 const playing = {
   fullscreen: true, paused: false, blocked: false, hovered: false,

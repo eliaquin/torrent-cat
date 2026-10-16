@@ -13,12 +13,10 @@ export function Settings({
   data,
   refresh,
   report,
-  importLibrary,
 }: {
   data: Snapshot;
   refresh: () => Promise<void>;
   report: (e: unknown) => void;
-  importLibrary: () => void;
 }) {
   const [prefs, setPrefs] = useState(data.profile.prefs),
     [startup, setStartup] = useState(false),
@@ -123,13 +121,6 @@ export function Settings({
                   Choose…
                 </Button>
               </div>
-            </div>
-            <div className="preference">
-              <strong>Existing TorrentCat library</strong>
-              <p>
-                Import torrents and playback positions from your original app.
-              </p>
-              <Button onClick={importLibrary}>Import library…</Button>
             </div>
           </Section>
           <Section
