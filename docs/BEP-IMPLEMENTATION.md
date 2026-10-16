@@ -14,8 +14,8 @@ Las referencias de líneas de la auditoría describen el commit base, no el cód
 | F6 — niveles y failover de trackers | Integrado en `6a91e4e` y publicado | Niveles, promoción y barrera privada |
 | F7 — recuperación y URLData UDP | Integrado en `edfed59` y publicado | Reloj simulado, UDP IPv4/IPv6 y ruta/query |
 | F8 — extensiones y PEX | Integrado en `4515126` y publicado | Negociación por TCP y filtrado de payload PEX |
-| F9 — ciclo de vida y persistencia | Implementado, revisado y validado | Fallos de disco, reinicio abrupto, tracker silencioso y cierre de conexiones |
-| F10 — contabilidad de escrituras parciales | Pendiente | |
+| F9 — ciclo de vida y persistencia | Integrado en `d4e988e` y publicado | Fallos de disco, reinicio abrupto, tracker silencioso y cierre de conexiones |
+| F10 — contabilidad de escrituras parciales | Implementado, revisado y validado | Transporte controlado, corrupción/repetición y anuncios locales |
 | F11 — recuperación de metadata persistida | Pendiente | |
 | F12 — pausa y borrado durante inicialización | Pendiente | |
 | F13 — límites al servir metadata | Pendiente | |
@@ -118,3 +118,12 @@ Cada torrent serializa sus operaciones; el lock global queda reservado al alta y
 Self-review y correcciones: liberar el permiso de trabajo bloqueante antes de guardar evitó una espera circular con un solo permiso; la prueba usa precisamente ese límite. Se mantuvo el descriptor confinado durante reintentos de borrado. Un fallo tras publicar la retirada del JSON ya no impide el siguiente reintento. Se impide que una pausa posterior resucite una entrada pendiente. Se corrigió la carrera al terminar el chequeo inicial consultando la intención actual; F12 conserva la revisión y regresiones deterministas específicas de inicialización. F11 conserva los casos de metadata ausente/corrupta y su presentación como recuperación, todavía pendientes. DHT/LSD externos reciben cancelación mediante su API, que no expone un handle de join; no se afirma haber añadido supervisión interna a esos crates.
 
 Validación: 53 pruebas de aplicación e integración pasan (1 de red pública ignorada); 39 del motor pasan (3 ignoradas y 5 E2E excluidas); 19 de tracker pasan (1 pública ignorada). Incluyen error de publicación real, inyección de disco lleno y error posterior a publicación, reintento de pausa/resume/borrado, salida abrupta de un subproceso con borrado pendiente, reinicio sin reutilizar IDs, tracker silencioso sin lock global, límite total con tres trackers fallidos, dos altas del mismo magnet, tareas canceladas antes del retorno y conexiones HTTP activas/ociosas cerradas. Clippy del motor/tracker con `-D warnings` pasa. Todo usa fixtures temporales y red loopback; no se simuló pérdida física de energía ni se usó TD.
+
+
+## F10: contabilidad de escrituras parciales
+
+La subida contabiliza cada porción de payload que `AsyncWrite` acepta, inmediatamente después de cada escritura y antes del siguiente punto de cancelación. Excluye el preámbulo de pieza y los mensajes de control/metadata/PEX. Un error, una escritura de cero bytes, timeout o cancelación conserva el avance anterior. Esta frontera mide aceptación por el transporte: no afirma recepción remota ni cuenta retransmisiones TCP. Una nueva solicitud BitTorrent de un bloque ya enviado sí cuenta como otra transferencia. Los totales visibles usan el contador de la sesión y sobreviven a pausa/reanudación, como los anuncios.
+
+Self-review: se comprobaron los cruces de cabecera/payload y la ausencia de await entre escribir y contabilizar. Se conservó la política de terminar una trama ya iniciada ante Cancel, cerrando la conexión ante error/timeout. La conversión del incremento a u32 es comprobada. La regresión de pausa detectó que el total visible se reiniciaba; ahora comparte el acumulador del tracker, sin alterar la base de los estimadores de velocidad.
+
+Validación: 41 pruebas del motor pasan (3 ignoradas y 5 E2E excluidas), 54 de aplicación/integración pasan (1 pública ignorada), y Clippy del motor con `-D warnings` pasa. Un transporte controlado cubre cada posición del preámbulo, el primer byte de payload, bloque intermedio/último, éxito, error, WriteZero, timeout, cancelación y mensajes sin payload. El peer TCP repite una subida y confirma totales tras pausa/reanudación. Otro peer local envía primero una pieza corrupta y luego su reemplazo: `downloaded` pasa de 16.384 a 32.768; `left` solo baja de 16.384 a cero después del hash correcto, con `completed` y `stopped` finales coherentes. Las pruebas HTTP/UDP existentes confirman también los contadores de subida en `stopped`. No se usaron trackers externos.

@@ -573,7 +573,7 @@ impl ManagedTorrent {
             state: S::Error,
             error: None,
             progress_bytes: 0,
-            uploaded_bytes: 0,
+            uploaded_bytes: self.shared.tracker_uploaded.load(Ordering::Relaxed),
             finished: false,
             live: None,
         };
@@ -600,7 +600,6 @@ impl ManagedTorrent {
                     resp.total_bytes = hns.total();
                     resp.progress_bytes = hns.progress();
                     resp.finished = hns.finished();
-                    resp.uploaded_bytes = l.get_uploaded_bytes();
                     resp.file_progress = l
                         .lock_read("file_progress")
                         .get_chunks()

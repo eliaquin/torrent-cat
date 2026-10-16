@@ -138,6 +138,21 @@ async fn interest_cancel_and_not_interested_control_queued_uploads() {
     let piece = message(&mut peer).await;
     assert_eq!(piece[0], 7);
     assert_eq!(&piece[1..5], &1u32.to_be_bytes());
+    // An explicit repeat is another payload transfer, even though disk have is unchanged.
+    peer.write_all(&request(6, 1)).await.unwrap();
+    let repeated = message(&mut peer).await;
+    assert_eq!(repeated, piece);
+    timeout(Duration::from_secs(1), async {
+        while h.stats().uploaded_bytes != 3 * 16384 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    session.pause(&h).await.unwrap();
+    assert_eq!(h.stats().uploaded_bytes, 3 * 16384);
+    session.unpause(&h).await.unwrap();
+    assert_eq!(h.stats().uploaded_bytes, 3 * 16384);
     drop(peer);
     session.stop().await;
 }
