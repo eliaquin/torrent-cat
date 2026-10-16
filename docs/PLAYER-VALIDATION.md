@@ -1,0 +1,21 @@
+# Player validation — 2026-10-15
+
+Tested on macOS with an isolated offline profile and generated H.264/AAC video. The MKV fixture contains English and Spanish audio tracks and text subtitles, with English marked as the default for both.
+
+## Automated checks
+
+- `npm run test:player`: 7 passing cases covering the idle timeout, renewed activity, windowed playback, pause, loading/error state, hover, keyboard focus and dragging.
+- `npm test`: 12 passing tests; the explicit public-network test remains skipped.
+- `npm run check`: TypeScript and Rust checks pass.
+- `npm run bundle`: release bundle builds and passes local ad-hoc signature verification.
+
+## Playback checks
+
+- Native VLC shows the default English audio and subtitle selections on initial playback.
+- Switching both tracks to Spanish updates the selectors.
+- Fullscreen video retains its aspect ratio and fills the available viewport, with controls layered above VLC.
+- Controls disappear during idle playback and reappear after pointer activity; paused playback keeps controls visible.
+- Fullscreen button, Escape, double-click and F toggle fullscreen. Returning to the library exits fullscreen.
+- Built-in playback works with an MP4 playback copy and the same fullscreen layout.
+
+Test fixtures and profiles are local, ignored files and are not included in the repository.

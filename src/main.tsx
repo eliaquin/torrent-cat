@@ -80,6 +80,7 @@ function App() {
       for (const p of Array.isArray(paths) ? paths : [paths]) await add(p);
   };
   const back = async () => {
+    await getCurrentWindow().setFullscreen(false).catch(report);
     await invoke("native_close").catch(() => {});
     await invoke("stop_stream").catch(report);
     setPlaying(null);
@@ -637,6 +638,7 @@ function App() {
           />
         ) : playing ? (
           <Player
+            onBack={() => void back()}
             playing={playing}
             data={data}
             report={report}

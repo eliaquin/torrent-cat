@@ -135,7 +135,14 @@ pub fn open(host: usize, url: String, r: Rect, position: f64) -> Result<Value> {
         let host = host as *mut AnyObject;
         let view: *mut AnyObject = msg_send![class!(NSView), alloc];
         let view: *mut AnyObject = msg_send![view,initWithFrame:frame(host,r)];
-        let _: () = msg_send![host,addSubview:view];
+        // Keep the transparent WKWebView above the video. Its DOM owns input and
+        // overlays, including fullscreen controls over VLC and its letterboxing.
+        let _: () = msg_send![view, setWantsLayer: true];
+        let layer: *mut AnyObject = msg_send![view, layer];
+        let black: *mut AnyObject = msg_send![class!(NSColor), blackColor];
+        let color: *const c_void = msg_send![black, CGColor];
+        let _: () = msg_send![layer, setBackgroundColor: color];
+        let _: () = msg_send![host, addSubview: view, positioned: -1isize, relativeTo: std::ptr::null::<AnyObject>()];
         state.view = view as usize;
         call!(
             state,
@@ -319,8 +326,16 @@ pub fn action(action: &str, value: f64) -> Result<Value> {
             unsafe extern "C" fn(*mut c_void) -> i32,
             p
         );
+        let audio_track = call!(
+            s, "libvlc_audio_get_track",
+            unsafe extern "C" fn(*mut c_void) -> i32, p
+        );
+        let subtitle_track = call!(
+            s, "libvlc_video_get_spu",
+            unsafe extern "C" fn(*mut c_void) -> i32, p
+        );
         Ok(
-            json!({"time":(time.max(0) as f64)/1000.0,"duration":(length.max(0) as f64)/1000.0,"state":state,"audio":tracks(s,false)?,"subtitles":tracks(s,true)?}),
+            json!({"time":(time.max(0) as f64)/1000.0,"duration":(length.max(0) as f64)/1000.0,"state":state,"audio":tracks(s,false)?,"subtitles":tracks(s,true)?,"audioTrack":audio_track,"subtitleTrack":subtitle_track}),
         )
     }
 }

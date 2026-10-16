@@ -60,6 +60,7 @@ Downloads use the folder selected in Preferences. Generated media caches current
 ```sh
 npm run check   # TypeScript and Rust checks
 npm test        # Rust unit and integration tests
+npm run test:player # Player control visibility tests
 npm run build  # Frontend production build
 ```
 

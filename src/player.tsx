@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Playing, Snapshot, clock, bytes } from "./types";
 import { Button, Icon } from "./ui";
+import { usePlayerPresentation } from "./use-player-presentation";
 type Track = { id: number; name: string };
 type NativeStatus = {
   time: number;
@@ -11,6 +11,8 @@ type NativeStatus = {
   state: number;
   audio: Track[];
   subtitles: Track[];
+  audioTrack: number;
+  subtitleTrack: number;
 };
 type Probe = {
   streams?: {
@@ -26,11 +28,13 @@ export function Player({
   data,
   report,
   onNext,
+  onBack,
 }: {
   playing: Playing;
   data: Snapshot;
   report: (e: unknown) => void;
   onNext: (delta: number) => void;
+  onBack: () => void;
 }) {
   const [url, setUrl] = useState(""),
     [engine, setEngine] = useState(data.profile.prefs.videoEngine),
@@ -45,6 +49,10 @@ export function Player({
     [probe, setProbe] = useState<Probe>({}),
     [native, setNative] = useState<NativeStatus | null>(null),
     [working, setWorking] = useState(false);
+  const presentation = usePlayerPresentation(
+    paused, !!message || working || !url || engine === "external",
+    engine === "vlc" && !!url && native !== null && !failed, report,
+  );
   const video = useRef<HTMLVideoElement>(null),
     surface = useRef<HTMLDivElement>(null),
     generation = useRef(0),
@@ -63,8 +71,10 @@ export function Player({
     return { x: r.x, y: r.y, width: r.width, height: r.height };
   };
   const control = async (action: string, value: number) => {
+    const requestSession = session.current;
     try {
-      await invoke("native_action", { action, value });
+      const status = await invoke<NativeStatus>("native_action", { action, value });
+      if (requestSession === session.current) setNative(status);
     } catch (e) {
       report(e);
     }
@@ -75,6 +85,9 @@ export function Player({
       position: position.current,
     }).catch(report);
   };
+  useEffect(() => {
+    surface.current?.focus({ preventScroll: true });
+  }, [presentation.fullscreen]);
   useEffect(() => {
     const gen = ++generation.current;
     session.current++;
@@ -118,6 +131,7 @@ export function Player({
     if (!url) return;
     const gen = ++session.current;
     nativeReady.current = false;
+    setNative(null);
     void (async () => {
       await invoke("native_close").catch(() => {});
       if (gen !== session.current) return;
@@ -234,17 +248,27 @@ export function Player({
     if (engine === "vlc") void control("seek", t);
     else if (video.current) video.current.currentTime = t;
   };
-  const keyHandler = useRef({ toggle, seek, time, onNext });
-  keyHandler.current = { toggle, seek, time, onNext };
+  const keyHandler = useRef({ toggle, seek, time, onNext, presentation });
+  keyHandler.current = { toggle, seek, time, onNext, presentation };
   useEffect(() => {
     const listener = (e: KeyboardEvent) => {
+      const h = keyHandler.current;
+      if (e.key === "Escape" && h.presentation.fullscreen) {
+        e.preventDefault();
+        void h.presentation.changeFullscreen(false);
+        return;
+      }
       if (
         ["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(
           (e.target as HTMLElement).tagName,
         )
       )
         return;
-      const h = keyHandler.current;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        void h.presentation.changeFullscreen();
+      }
       if (e.code === "Space") {
         e.preventDefault();
         h.toggle();
@@ -305,8 +329,14 @@ export function Player({
     }
   };
   return (
-    <section className="player-page" aria-label="Media player">
-      <div className="player-toolbar">
+    <section
+      className={`player-page${presentation.hidden ? " controls-hidden" : ""}`}
+      aria-label="Media player"
+    >
+      <div className="player-toolbar" {...presentation.chromeEvents}>
+        {presentation.fullscreen && (
+          <Button icon="arrow_back" title="Back to library" onClick={onBack} />
+        )}
         <span className="player-filename" title={playing.name}>
           {playing.name.split("/").pop()}
         </span>
@@ -326,7 +356,11 @@ export function Player({
           <option value="external">External player</option>
         </select>
       </div>
-      <div className="video-surface" ref={surface}>
+      <div
+        className="video-surface" ref={surface} tabIndex={0}
+        aria-label="Video; double-click or press F to toggle fullscreen"
+        onDoubleClick={() => void presentation.changeFullscreen()}
+      >
         {engine === "builtin" && url ? (
           <video
             key={url}
@@ -385,7 +419,7 @@ export function Player({
           </div>
         ) : null}
       </div>
-      <div className="player-bottom">
+      <div className="player-bottom" {...presentation.chromeEvents}>
         {(message || working) && (
           <div
             className={"player-message " + (failed ? "has-error" : "")}
@@ -482,15 +516,17 @@ export function Player({
           {engine === "vlc" && native?.audio.length ? (
             <select
               aria-label="Audio track"
-              defaultValue=""
+              value={native.audioTrack}
               onChange={(e) => void control("audio", Number(e.target.value))}
             >
-              <option value="" disabled>
-                Audio track
-              </option>
+              {!native.audio.some((track) => track.id === native.audioTrack) && (
+                <option value={native.audioTrack}>
+                  {native.audioTrack === -1 ? "Off" : `Track ${native.audioTrack}`}
+                </option>
+              )}
               {native.audio.map((t) => (
                 <option key={t.id} value={t.id}>
-                  {t.name || `Track ${t.id}`}
+                  {t.id === -1 ? "Off" : t.name || `Track ${t.id}`}
                 </option>
               ))}
             </select>
@@ -520,15 +556,17 @@ export function Player({
           {engine === "vlc" && native?.subtitles.length ? (
             <select
               aria-label="Subtitle track"
-              defaultValue=""
+              value={native.subtitleTrack}
               onChange={(e) => void control("subtitle", Number(e.target.value))}
             >
-              <option value="" disabled>
-                Subtitles
-              </option>
+              {!native.subtitles.some((track) => track.id === native.subtitleTrack) && (
+                <option value={native.subtitleTrack}>
+                  {native.subtitleTrack === -1 ? "Off" : `Track ${native.subtitleTrack}`}
+                </option>
+              )}
               {native.subtitles.map((t) => (
                 <option key={t.id} value={t.id}>
-                  {t.name || `Track ${t.id}`}
+                  {t.id === -1 ? "Off" : t.name || `Track ${t.id}`}
                 </option>
               ))}
             </select>
@@ -575,12 +613,10 @@ export function Player({
             onClick={() => void addSub()}
           />
           <Button
-            icon="fullscreen"
-            title="Full screen"
-            onClick={async () => {
-              const w = getCurrentWindow();
-              await w.setFullscreen(!(await w.isFullscreen()));
-            }}
+            icon={presentation.fullscreen ? "fullscreen_exit" : "fullscreen"}
+            title={presentation.fullscreen ? "Exit full screen" : "Full screen"}
+            aria-pressed={presentation.fullscreen}
+            onClick={() => void presentation.changeFullscreen()}
           />
         </div>
         <div className="download-strip">
