@@ -19,9 +19,14 @@ struct Pending {
 }
 
 pub fn start(core: Arc<Core>, app: tauri::AppHandle) {
-    tauri::async_runtime::spawn(run(core, move |message| {
-        let _ = app.emit("notice", message);
-    }));
+    let session = core.api.session().clone();
+    session.spawn(tracing::Span::current(), "watch-folder", async move {
+        run(core, move |message| {
+            let _ = app.emit("notice", message);
+        })
+        .await;
+        Ok(())
+    });
 }
 
 pub(crate) async fn run(core: Arc<Core>, report: impl Fn(String) + Send + 'static) {

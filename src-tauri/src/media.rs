@@ -23,35 +23,77 @@ pub enum Source {
 pub struct Media {
     pub port: u16,
     grants: Arc<Mutex<HashMap<String, Source>>>,
+    shutdown: tokio::sync::watch::Sender<bool>,
+    task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 #[derive(Clone)]
 struct Server {
     api: Api,
-    media: Media,
+    port: u16,
+    grants: Arc<Mutex<HashMap<String, Source>>>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
 }
 impl Media {
     pub async fn start(api: Api) -> Result<Self> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
         let media = Self {
             port: listener.local_addr()?.port(),
             grants: Default::default(),
+            shutdown,
+            task: Default::default(),
         };
         let router = Router::new()
             .route("/media/{token}", get(serve))
             .with_state(Server {
                 api,
-                media: media.clone(),
+                port: media.port,
+                grants: media.grants.clone(),
+                shutdown: shutdown_rx.clone(),
             });
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, router).await {
-                eprintln!("Media server: {e}");
+        let task = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.wait_for(|stop| *stop) => break,
+                    _ = connections.join_next(), if !connections.is_empty() => {},
+                    accepted = listener.accept() => {
+                        let (socket, _) = match accepted {
+                            Ok(accepted) => accepted,
+                            Err(error) => { eprintln!("Media listener: {error}"); break; },
+                        };
+                        let service = hyper_util::service::TowerToHyperService::new(router.clone());
+                        connections.spawn(async move {
+                            let _ = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(hyper_util::rt::TokioIo::new(socket), service).await;
+                        });
+                    }
+                }
             }
+            // Own each connection so stalled readers cannot survive shutdown.
+            drop(listener);
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
         });
+        *media.task.lock().await = Some(task);
         Ok(media)
     }
+    pub async fn shutdown(&self) {
+        self.shutdown.send_replace(true);
+        self.revoke_all().await;
+        // Serialize concurrent shutdown calls until the listener has stopped.
+        let mut guard = self.task.lock().await;
+        if let Some(task) = guard.take() {
+            let _ = task.await;
+        }
+    }
+
     pub async fn grant(&self, source: Source) -> String {
         let token = uuid::Uuid::new_v4().simple().to_string();
-        self.grants.lock().await.insert(token.clone(), source);
+        let mut grants = self.grants.lock().await;
+        if !*self.shutdown.borrow() {
+            grants.insert(token.clone(), source);
+        }
         format!("http://127.0.0.1:{}/media/{token}", self.port)
     }
     pub async fn revoke_all(&self) {
@@ -82,7 +124,7 @@ async fn serve(
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     if headers.get("host").and_then(|v| v.to_str().ok())
-        != Some(format!("127.0.0.1:{}", server.media.port).as_str())
+        != Some(format!("127.0.0.1:{}", server.port).as_str())
     {
         return Err((StatusCode::FORBIDDEN, "Invalid host".into()));
     }
@@ -96,7 +138,6 @@ async fn serve(
         return Err((StatusCode::FORBIDDEN, "Invalid origin".into()));
     }
     let source = server
-        .media
         .grants
         .lock()
         .await
@@ -172,8 +213,22 @@ async fn serve(
             Box::new(r.take(size))
         }
     };
-    let grants = server.media.grants.clone();
-    let stream = async_stream::try_stream! { let mut reader=reader; loop {if !grants.lock().await.contains_key(&token){break;} let mut buf=vec![0u8;65536];let n=reader.read(&mut buf).await?;if n==0{break;}buf.truncate(n);yield Bytes::from(buf);} };
+    let grants = server.grants.clone();
+    let mut shutdown = server.shutdown.clone();
+    let stream = async_stream::try_stream! {
+        let mut reader = reader;
+        loop {
+            if *shutdown.borrow() || !grants.lock().await.contains_key(&token) { break; }
+            let mut buf = vec![0u8; 65536];
+            let n = tokio::select! {
+                _ = shutdown.wait_for(|stop| *stop) => break,
+                result = reader.read(&mut buf) => result,
+            }?;
+            if n == 0 { break; }
+            buf.truncate(n);
+            yield Bytes::from(buf);
+        }
+    };
     let stream: std::pin::Pin<Box<dyn futures_core::Stream<Item = std::io::Result<Bytes>> + Send>> =
         Box::pin(stream);
     Ok(builder.body(Body::from_stream(stream)).unwrap())
@@ -234,6 +289,55 @@ pub fn byte_range(header: Option<&str>, len: u64) -> Result<(u64, u64), ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_closes_listener_and_rejects_late_grants() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = librqbit::Session::new_with_opts(
+            temp.path().into(),
+            librqbit::SessionOptions {
+                dht: None,
+                disable_trackers: true,
+                disable_local_service_discovery: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let media = Media::start(Api::new(session.clone(), None)).await.unwrap();
+        let file = temp.path().join("video.bin");
+        std::fs::write(&file, vec![42; 8 * 1024 * 1024]).unwrap();
+        let url = media
+            .grant(Source::Local(file.clone(), "video/mp4".into()))
+            .await;
+        let response = reqwest::get(&url).await.unwrap();
+        assert!(response.status().is_success());
+        let mut idle = tokio::net::TcpStream::connect(("127.0.0.1", media.port))
+            .await
+            .unwrap();
+        let shutdown = media.shutdown();
+        let repeated = media.shutdown();
+        tokio::join!(shutdown, repeated);
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", media.port))
+                .await
+                .is_err()
+        );
+        let mut byte = [0];
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(3), idle.read(&mut byte))
+            .await
+            .unwrap();
+        assert!(matches!(closed, Ok(0) | Err(_)));
+        assert!(!media.authorized(&url).await);
+        let late = media.grant(Source::Local(file, "video/mp4".into())).await;
+        assert!(!media.authorized(&late).await);
+        // A response already in progress must also finish or report disconnect;
+        // closing only the listener would leave this request alive indefinitely.
+        tokio::time::timeout(std::time::Duration::from_secs(3), response.bytes())
+            .await
+            .unwrap()
+            .ok();
+        session.stop().await;
+    }
     #[test]
     fn ranges() {
         assert_eq!(byte_range(Some("bytes=5-9"), 100), Ok((5, 9)));

@@ -189,6 +189,9 @@ pub struct ManagedTorrentShared {
     pub(crate) tracker_uploaded: AtomicU64,
     pub(crate) tracker_have: AtomicU64,
     pub(crate) transfer_tasks: tokio_util::task::TaskTracker,
+    pub(crate) lifecycle: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) deleting: std::sync::atomic::AtomicBool,
+    pub(crate) delete_files: std::sync::atomic::AtomicBool,
     pub peer_id: Id20,
     pub span: tracing::Span,
     pub(crate) options: ManagedTorrentOptions,
@@ -261,10 +264,6 @@ impl ManagedTorrent {
 
     pub fn with_state<R>(&self, f: impl FnOnce(&ManagedTorrentState) -> R) -> R {
         f(&self.locked.read().state)
-    }
-
-    pub(crate) fn with_state_mut<R>(&self, f: impl FnOnce(&mut ManagedTorrentState) -> R) -> R {
-        f(&mut self.locked.write().state)
     }
 
     pub(crate) fn with_chunk_tracker<R>(
@@ -399,11 +398,13 @@ impl ManagedTorrent {
                     let span = t.shared().span.clone();
                     let token = token.clone();
 
+                    let task = t.shared.transfer_tasks.token();
                     spawn_with_cancel(
                         debug_span!(parent: span.clone(), "initialize_and_start"),
                         "initialize_and_start",
                         token.clone(),
                         async move {
+                            let _task = task;
                             let concurrent_init_semaphore =
                                 session.concurrent_initialize_semaphore.clone();
                             let _permit = concurrent_init_semaphore
@@ -427,7 +428,9 @@ impl ManagedTorrent {
 
                                     g.state = ManagedTorrentState::Paused(paused);
                                     t.state_change_notify.notify_waiters();
-                                    _start(&t, peer_rx, start_paused, session, Some(g), token)
+                                    let stay_paused =
+                                        g.paused || t.shared.deleting.load(Ordering::Acquire);
+                                    _start(&t, peer_rx, stay_paused, session, Some(g), token)
                                 }
                                 Err(err) => {
                                     if init.is_pause_requested() {
@@ -523,11 +526,9 @@ impl ManagedTorrent {
                 self.state_change_notify.notify_waiters();
                 Ok(())
             }
-            ManagedTorrentState::Paused(_) => {
-                bail!("torrent is already paused");
-            }
-            ManagedTorrentState::Error(_) => {
-                bail!("can't pause torrent in error state")
+            ManagedTorrentState::Paused(_) | ManagedTorrentState::Error(_) => {
+                g.paused = true;
+                Ok(())
             }
             ManagedTorrentState::None => bail!("bug: torrent is in empty state"),
         }
@@ -715,12 +716,14 @@ fn spawn_fatal_errors_receiver(
     let span = state.shared.span.clone();
     let id = state.shared.id;
     let info_hash = state.shared.info_hash;
+    let task = state.shared.transfer_tasks.token();
     let state = Arc::downgrade(state);
     spawn_with_cancel::<&'static str>(
         debug_span!(parent: span, "fatal_errors_receiver"),
         "fatal_errors_receiver",
         token,
         async move {
+            let _task = task;
             let e = match rx.await {
                 Ok(e) => e,
                 Err(_) => return Ok(()),

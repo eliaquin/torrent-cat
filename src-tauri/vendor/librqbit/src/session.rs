@@ -126,6 +126,9 @@ pub struct Session {
     tracker_tasks: RwLock<HashMap<Id20, TaskTracker>>,
     closing: CancellationToken,
     lifecycle: tokio::sync::Mutex<()>,
+    stopping: tokio::sync::Mutex<()>,
+    background_tasks: TaskTracker,
+    adding: RwLock<HashMap<Id20, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     _cancellation_token_drop_guard: DropGuard,
 
     // Runtime settings
@@ -804,6 +807,9 @@ impl Session {
                 tracker_tasks: RwLock::new(HashMap::new()),
                 closing: CancellationToken::new(),
                 lifecycle: tokio::sync::Mutex::new(()),
+                stopping: tokio::sync::Mutex::new(()),
+                background_tasks: TaskTracker::new(),
+                adding: Default::default(),
                 announce_port: listen_result.as_ref().and_then(|l| l.announce_port),
                 listen_addr: listen_result.as_ref().map(|l| l.addr),
                 default_storage_factory: opts.default_storage_factory,
@@ -899,10 +905,18 @@ impl Session {
                                 Some(st) => {
                                     let (id, st) = st?;
                                     let span = add_torrent_span(st.info_hash());
+                                    let pending_delete = st.pending_delete;
                                     let (add_torrent, mut opts) = st.into_add_torrent()?;
                                     opts.preferred_id = Some(id);
-                                    let fut = session.add_torrent(add_torrent, Some(opts));
-                                    let fut = fut.instrument(span);
+                                    if pending_delete.is_some() { opts.paused = true; }
+                                    let session = session.clone();
+                                    let fut = async move {
+                                        let result = session.add_torrent(add_torrent, Some(opts)).await?;
+                                        if let Some(delete_files) = pending_delete {
+                                            session.delete(id.into(), delete_files).await?;
+                                        }
+                                        Ok::<_, anyhow::Error>(result)
+                                    }.instrument(span);
                                     futs.push(fut);
                                 },
                                 None => added_all = true
@@ -1066,7 +1080,11 @@ impl Session {
         name: impl Into<Cow<'static, str>>,
         fut: impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
     ) {
-        spawn_with_cancel(span, name, self.cancellation_token.clone(), fut);
+        let task = self.background_tasks.token();
+        spawn_with_cancel(span, name, self.cancellation_token.clone(), async move {
+            let _task = task;
+            fut.await
+        });
     }
 
     pub(crate) fn rs(&self) -> Option<tracing::Id> {
@@ -1075,16 +1093,19 @@ impl Session {
 
     /// Stop the session and all managed tasks.
     pub async fn stop(&self) {
-        let _lifecycle = self.lifecycle.lock().await;
+        let _stopping = self.stopping.lock().await;
         self.closing.cancel();
-        let torrents = self
-            .db
-            .read()
-            .torrents
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        for torrent in torrents {
+        let torrents = {
+            let _lifecycle = self.lifecycle.lock().await;
+            self.db
+                .read()
+                .torrents
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        for torrent in &torrents {
+            let _operation = torrent.shared.lifecycle.lock().await;
             if let Err(e) = torrent.pause() {
                 debug!("error pausing torrent: {e:#}");
             }
@@ -1093,17 +1114,24 @@ impl Session {
         for task in &tasks {
             task.close();
         }
-        // Announce workers outlive peer cancellation long enough to send stopped.
-        let waits = futures::future::join_all(tasks.iter().map(|task| task.wait()));
-        if tokio::time::timeout(Duration::from_secs(9), waits)
-            .await
-            .is_err()
+        if tokio::time::timeout(
+            Duration::from_secs(9),
+            futures::future::join_all(tasks.iter().map(|t| t.wait())),
+        )
+        .await
+        .is_err()
         {
             warn!("tracker shutdown timed out; final announces could not be confirmed");
         }
         self.cancellation_token.cancel();
-        // this sucks, but hopefully will be enough
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        self.udp_tracker_client.stop().await;
+        self.background_tasks.close();
+        self.background_tasks.wait().await;
+        for torrent in torrents {
+            torrent.shared.transfer_tasks.close();
+            torrent.shared.transfer_tasks.wait().await;
+        }
+        futures::future::join_all(tasks.iter().map(|task| task.wait())).await;
     }
 
     /// Run a callback given the currently managed torrents.
@@ -1257,6 +1285,34 @@ impl Session {
             name,
         } = add_res;
 
+        let add_lock = {
+            let mut locks = self.adding.write();
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            let lock = locks
+                .get(&info_hash)
+                .and_then(|lock| lock.upgrade())
+                .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
+            locks.insert(info_hash, Arc::downgrade(&lock));
+            lock
+        };
+        let _add = tokio::select! {
+            guard = add_lock.lock() => guard,
+            _ = self.closing.cancelled() => bail!("session is stopping"),
+        };
+        if !opts.list_only
+            && let Some(existing) = self.get(info_hash.into())
+        {
+            let _operation = existing.shared.lifecycle.lock().await;
+            if self.ensure_managed(&existing).is_ok() {
+                if existing.shared.deleting.load(Ordering::Acquire) {
+                    bail!("torrent removal is pending");
+                }
+                return Ok(AddTorrentResponse::AlreadyManaged(
+                    existing.id(),
+                    existing.clone(),
+                ));
+            }
+        }
         if metadata.is_none() {
             let existing = self
                 .db
@@ -1401,7 +1457,7 @@ impl Session {
 
         let _permit = self.spawner.semaphore().acquire_owned().await?;
 
-        let (managed_torrent, metadata) = {
+        let (managed_torrent, metadata, _operation) = {
             let mut g = self.db.write();
             if let Some((id, handle)) = g.torrents.iter().find_map(|(eid, t)| {
                 if t.info_hash() == info_hash || *eid == id {
@@ -1426,6 +1482,9 @@ impl Session {
                 tracker_uploaded: AtomicU64::new(0),
                 tracker_have: AtomicU64::new(0),
                 transfer_tasks: TaskTracker::new(),
+                lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+                deleting: std::sync::atomic::AtomicBool::new(false),
+                delete_files: std::sync::atomic::AtomicBool::new(false),
                 spawner: self.spawner.clone(),
                 peer_id: self.peer_id,
                 storage_factory,
@@ -1465,10 +1524,19 @@ impl Session {
                 metadata: ArcSwapOption::new(Some(metadata.clone())),
             });
 
+            // Acquire before publishing the handle: pause/delete must not race
+            // the initial durable store or be overwritten by start's defaults.
+            let operation = handle
+                .shared
+                .lifecycle
+                .clone()
+                .try_lock_owned()
+                .expect("new torrent lifecycle mutex is unlocked");
             g.add_torrent(handle.clone(), id);
-            (handle, metadata)
+            (handle, metadata, operation)
         };
 
+        drop(_permit);
         if let Some(p) = self.persistence.as_ref()
             && let Err(e) = p.store(id, &managed_torrent).await
         {
@@ -1503,94 +1571,53 @@ impl Session {
     }
 
     pub async fn delete(&self, id: TorrentIdOrHash, delete_files: bool) -> anyhow::Result<()> {
-        let _lifecycle = self.lifecycle.lock().await;
-        let id = match id {
-            TorrentIdOrHash::Id(id) => id,
-            TorrentIdOrHash::Hash(h) => self
-                .db
-                .read()
-                .torrents
-                .values()
-                .find_map(|v| {
-                    if v.info_hash() == h {
-                        Some(v.id())
-                    } else {
-                        None
-                    }
-                })
-                .context("no such torrent in db")?,
+        let Some(handle) = self.get(id) else {
+            return Ok(());
         };
-        let removed = self
-            .db
-            .write()
-            .torrents
-            .remove(&id)
-            .with_context(|| format!("torrent with id {id} did not exist"))?;
-
-        if let Err(e) = removed.pause() {
-            debug!("error pausing torrent before deletion: {e:#}")
+        let _operation = handle.shared.lifecycle.lock().await;
+        if self.ensure_managed(&handle).is_err() {
+            return Ok(());
         }
-
-        self.wait_for_tracker_stop(removed.info_hash()).await?;
-        self.tracker_tasks.write().remove(&removed.info_hash());
-
-        let metadata = removed.metadata.load_full().expect("TODO");
-
-        let storage = removed
-            .with_state_mut(|s| match s.take() {
-                ManagedTorrentState::Initializing(p) => p.files.take().ok(),
-                ManagedTorrentState::Paused(p) => Some(p.files),
-                ManagedTorrentState::Live(l) => l
-                    .pause()
-                    // inspect_err not available in 1.75
-                    .map_err(|e| {
-                        warn!(?id, "error pausing torrent: {e:#}");
-                        e
-                    })
-                    .ok()
-                    .map(|p| p.files),
-                _ => None,
-            })
-            .map(Ok)
-            .unwrap_or_else(|| {
-                removed
-                    .shared
-                    .storage_factory
-                    .create(removed.shared(), &metadata)
-            });
-
-        if let Some(p) = self.persistence.as_ref() {
-            if let Err(e) = p.delete(id).await {
-                error!(
-                    ?id,
-                    "error deleting torrent from persistence database: {e:#}"
-                );
-            } else {
-                debug!(?id, "deleted torrent from persistence database")
-            }
+        handle.pause()?;
+        let delete_files = delete_files || handle.shared.delete_files.load(Ordering::Acquire);
+        // Once removal is requested, keep the in-memory handle inert even if
+        // persistence reports an uncertain commit (rename succeeded, fsync failed).
+        handle
+            .shared
+            .delete_files
+            .store(delete_files, Ordering::Release);
+        handle.shared.deleting.store(true, Ordering::Release);
+        if let Some(p) = &self.persistence {
+            p.mark_delete_pending(handle.id(), delete_files).await?;
         }
-
-        match (storage, delete_files) {
-            (Err(e), true) => return Err(e).context("torrent deleted, but could not delete files"),
-            (Ok(storage), true) => {
-                debug!("will delete files");
-                remove_files_and_dirs(&metadata.file_infos, &storage);
-                if removed.shared().options.output_folder != self.output_folder
-                    && let Err(e) = storage.remove_directory_if_empty(Path::new(""))
-                {
-                    warn!(
-                        ?id,
-                        "error removing {:?}: {e:#}",
-                        removed.shared().options.output_folder
-                    )
+        self.quiesce(&handle).await?;
+        if delete_files {
+            let metadata = handle
+                .metadata
+                .load_full()
+                .context("metadata unavailable for removal")?;
+            handle.with_state(|state| match state {
+                ManagedTorrentState::Paused(p) => {
+                    remove_files_and_dirs(&metadata.file_infos, &p.files)
                 }
-            }
-            (_, false) => {
-                debug!("not deleting files")
-            }
-        };
-
-        info!(id, "deleted torrent");
+                ManagedTorrentState::Initializing(p) => {
+                    remove_files_and_dirs(&metadata.file_infos, &p.files)
+                }
+                _ => {
+                    let storage = handle
+                        .shared
+                        .storage_factory
+                        .create(handle.shared(), &metadata)?;
+                    remove_files_and_dirs(&metadata.file_infos, &storage)
+                }
+            })?;
+        }
+        if let Some(p) = &self.persistence {
+            p.delete(handle.id()).await?;
+        }
+        self.db.write().torrents.remove(&handle.id());
+        self.tracker_tasks.write().remove(&handle.info_hash());
+        info!(id = handle.id(), "deleted torrent");
         Ok(())
     }
 
@@ -1684,12 +1711,35 @@ impl Session {
         )
     }
 
-    async fn try_update_persistence_metadata(&self, handle: &ManagedTorrentHandle) {
-        if let Some(p) = self.persistence.as_ref()
-            && let Err(e) = p.update_metadata(handle.id(), handle).await
+    fn ensure_managed(&self, handle: &ManagedTorrentHandle) -> anyhow::Result<()> {
+        if !self
+            .get(handle.id().into())
+            .is_some_and(|current| Arc::ptr_eq(&current, handle))
         {
-            warn!(storage=?p, error=?e, "error updating metadata")
+            bail!("torrent is no longer managed");
         }
+        Ok(())
+    }
+
+    async fn try_update_persistence_metadata(
+        &self,
+        handle: &ManagedTorrentHandle,
+    ) -> anyhow::Result<()> {
+        if let Some(p) = &self.persistence {
+            p.update_metadata(handle.id(), handle).await?;
+        }
+        Ok(())
+    }
+
+    async fn quiesce(&self, handle: &ManagedTorrentHandle) -> anyhow::Result<()> {
+        handle.shared.transfer_tasks.close();
+        tokio::time::timeout(Duration::from_secs(10), handle.shared.transfer_tasks.wait())
+            .await
+            .context("torrent transfers have not stopped; retry the operation")?;
+        if let Err(error) = self.wait_for_tracker_stop(handle.info_hash()).await {
+            warn!(%error, "local operation completed; final tracker announce unconfirmed");
+        }
+        Ok(())
     }
 
     async fn wait_for_tracker_stop(&self, hash: Id20) -> anyhow::Result<()> {
@@ -1704,16 +1754,25 @@ impl Session {
     }
 
     pub async fn pause(&self, handle: &ManagedTorrentHandle) -> anyhow::Result<()> {
-        let _lifecycle = self.lifecycle.lock().await;
+        let _operation = handle.shared.lifecycle.lock().await;
+        self.ensure_managed(handle)?;
+        if handle.shared.deleting.load(Ordering::Acquire) {
+            bail!("torrent removal is pending");
+        }
         handle.pause()?;
-        self.wait_for_tracker_stop(handle.info_hash()).await?;
-        self.try_update_persistence_metadata(handle).await;
-        Ok(())
+        let persisted = self.try_update_persistence_metadata(handle).await;
+        let stopped = self.quiesce(handle).await;
+        persisted?;
+        stopped
     }
 
     /// Verify all current disk files; remains paused and performs no discovery.
     pub async fn recheck(&self, handle: &ManagedTorrentHandle) -> anyhow::Result<()> {
-        let _lifecycle = self.lifecycle.lock().await;
+        let _operation = handle.shared.lifecycle.lock().await;
+        self.ensure_managed(handle)?;
+        if handle.shared.deleting.load(Ordering::Acquire) {
+            bail!("torrent removal is pending");
+        }
         if self.closing.is_cancelled() {
             bail!("session is stopping");
         }
@@ -1722,12 +1781,16 @@ impl Session {
         }
         self.wait_for_tracker_stop(handle.info_hash()).await?;
         handle.recheck()?;
-        self.try_update_persistence_metadata(handle).await;
+        self.try_update_persistence_metadata(handle).await?;
         Ok(())
     }
 
     pub async fn unpause(self: &Arc<Self>, handle: &ManagedTorrentHandle) -> anyhow::Result<()> {
-        let _lifecycle = self.lifecycle.lock().await;
+        let _operation = handle.shared.lifecycle.lock().await;
+        self.ensure_managed(handle)?;
+        if handle.shared.deleting.load(Ordering::Acquire) {
+            bail!("torrent removal is pending");
+        }
         if self.closing.is_cancelled() {
             bail!("session is stopping");
         }
@@ -1737,7 +1800,11 @@ impl Session {
         self.wait_for_tracker_stop(handle.info_hash()).await?;
         let peer_rx = self.make_peer_rx_managed_torrent(handle, true);
         handle.start(peer_rx, false)?;
-        self.try_update_persistence_metadata(handle).await;
+        if let Err(error) = self.try_update_persistence_metadata(handle).await {
+            handle.pause()?;
+            let _ = self.quiesce(handle).await;
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -1746,8 +1813,13 @@ impl Session {
         handle: &ManagedTorrentHandle,
         only_files: &HashSet<usize>,
     ) -> anyhow::Result<()> {
+        let _operation = handle.shared.lifecycle.lock().await;
+        self.ensure_managed(handle)?;
+        if handle.shared.deleting.load(Ordering::Acquire) {
+            bail!("torrent removal is pending");
+        }
         handle.update_only_files(only_files)?;
-        self.try_update_persistence_metadata(handle).await;
+        self.try_update_persistence_metadata(handle).await?;
         Ok(())
     }
 
@@ -1855,7 +1927,7 @@ pub(crate) struct ResolveMagnetResult {
     pub seen_peers: Vec<SocketAddr>,
 }
 
-fn remove_files_and_dirs(infos: &FileInfos, files: &dyn TorrentStorage) {
+fn remove_files_and_dirs(infos: &FileInfos, files: &dyn TorrentStorage) -> anyhow::Result<()> {
     let mut all_dirs = HashSet::new();
     for (id, fi) in infos.iter().enumerate() {
         if fi.attrs.padding {
@@ -1863,7 +1935,13 @@ fn remove_files_and_dirs(infos: &FileInfos, files: &dyn TorrentStorage) {
         }
         let mut fname = &*fi.relative_filename;
         if let Err(e) = files.remove_file(id, fname) {
-            warn!(?fi.relative_filename, error=?e, "could not delete file");
+            if !e.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            }) {
+                return Err(e).context("could not delete torrent file; removal remains pending");
+            }
         } else {
             debug!(?fi.relative_filename, "deleted the file")
         }
@@ -1882,11 +1960,19 @@ fn remove_files_and_dirs(infos: &FileInfos, files: &dyn TorrentStorage) {
     };
     for dir in all_dirs {
         if let Err(e) = files.remove_directory_if_empty(dir) {
-            warn!("error removing {dir:?}: {e:#}");
+            if !e.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            }) {
+                return Err(e)
+                    .context("could not remove torrent directory; removal remains pending");
+            }
         } else {
             debug!("removed {dir:?}")
         }
     }
+    Ok(())
 }
 
 // Preserve BEP 12 tiers from original metainfo. Extra public trackers form

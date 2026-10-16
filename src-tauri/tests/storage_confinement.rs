@@ -147,7 +147,19 @@ async fn deleting_after_root_or_child_replacement_preserves_external_files() {
             std::fs::rename(output.join("nested"), output.join("original")).unwrap();
             symlink(outside.join("nested"), output.join("nested")).unwrap();
         }
-        s.delete(h.id().into(), true).await.unwrap();
+        let removed = s.delete(h.id().into(), true).await;
+        if replace_root {
+            removed.unwrap();
+        } else {
+            assert!(
+                removed.is_err(),
+                "escaping child path must report incomplete deletion"
+            );
+            assert!(
+                s.get(h.id().into()).is_some(),
+                "failed deletion must remain retryable"
+            );
+        }
         s.stop().await;
         assert_eq!(
             std::fs::read(outside.join("nested/payload.bin")).unwrap(),

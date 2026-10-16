@@ -30,6 +30,8 @@ pub struct SerializedTorrent {
     output_folder: PathBuf,
     only_files: Option<Vec<usize>>,
     is_paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_delete: Option<bool>,
 }
 
 impl SerializedTorrent {
@@ -37,6 +39,11 @@ impl SerializedTorrent {
         &self.info_hash
     }
     pub fn into_add_torrent(self) -> anyhow::Result<(AddTorrent<'static>, AddTorrentOptions)> {
+        if self.pending_delete.is_some() && self.torrent_bytes.is_empty() {
+            anyhow::bail!(
+                "pending removal requires saved torrent metadata; recovery entry retained"
+            );
+        }
         let add_torrent = if !self.torrent_bytes.is_empty() {
             AddTorrent::TorrentFileBytes(self.torrent_bytes)
         } else {
@@ -71,6 +78,9 @@ impl SerializedTorrent {
 pub trait SessionPersistenceStore: core::fmt::Debug + Send + Sync + BitVFactory {
     async fn next_id(&self) -> anyhow::Result<TorrentId>;
     async fn store(&self, id: TorrentId, torrent: &ManagedTorrentHandle) -> anyhow::Result<()>;
+    async fn mark_delete_pending(&self, _id: TorrentId, _delete_files: bool) -> anyhow::Result<()> {
+        anyhow::bail!("persistence backend does not support durable removal")
+    }
     async fn delete(&self, id: TorrentId) -> anyhow::Result<()>;
     async fn get(&self, id: TorrentId) -> anyhow::Result<SerializedTorrent>;
     async fn update_metadata(

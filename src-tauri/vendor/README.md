@@ -23,6 +23,10 @@ TorrentCat modifications:
   directory sync; never flush unsynced bitmaps on drop.
 - Bound upload admission across peer/session queues, honor cancellation and interest,
   schedule ready peers round robin and bound writer/metadata request queues.
+- Persist pause/removal intent before tracker cleanup, retain failed removals for
+  retry and restart, and atomically sync JSON/metainfo plus unlink directories.
+  Serialize operations per torrent, deduplicate concurrent magnet resolution and
+  preserve monotonic persisted IDs. Join owned tasks and bound total final announces.
 - Track actual payload bytes across pauses, independently of verified disk data.
 - Calculate tracker `left` across all files, including deselected files.
 - Send HTTP/UDP lifecycle events and await bounded stopped requests on pause,
@@ -55,7 +59,7 @@ That crate omits the upstream benchmark target and Criterion dev dependency.
 Other vendored sources retain their upstream implementation.
 
 Regression tests live in `../src/tracker_tests.rs` and
-`../tests/storage_confinement.rs` and use only temporary data,
+`../tests/storage_confinement.rs`, `../tests/lifecycle.rs` and use only temporary data,
 loopback HTTP/UDP trackers and loopback peers:
 
 ```sh

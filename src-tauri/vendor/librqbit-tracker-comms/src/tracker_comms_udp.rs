@@ -305,6 +305,7 @@ impl ClientLocked {
 
 struct ClientShared {
     cancel: CancellationToken,
+    tasks: tokio_util::task::TaskTracker,
     sock: UdpSocket,
     locked: RwLock<ClientLocked>,
 }
@@ -344,17 +345,28 @@ impl UdpTrackerClient {
         let client = Self {
             state: Arc::new(ClientShared {
                 cancel: cancel_token.clone(),
+                tasks: tokio_util::task::TaskTracker::new(),
                 sock,
                 locked: RwLock::new(Default::default()),
             }),
         };
 
+        let task = client.state.tasks.token();
         spawn_with_cancel(debug_span!("udp_tracker"), "udp_tracker", cancel_token, {
             let client = client.clone();
-            async move { client.run().await }
+            async move {
+                let _task = task;
+                client.run().await
+            }
         });
 
         Ok(client)
+    }
+
+    pub async fn stop(&self) {
+        self.state.cancel.cancel();
+        self.state.tasks.close();
+        self.state.tasks.wait().await;
     }
 
     async fn run(self) -> anyhow::Result<()> {
