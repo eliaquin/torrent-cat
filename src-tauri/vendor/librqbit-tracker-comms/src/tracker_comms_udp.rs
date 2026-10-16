@@ -52,6 +52,13 @@ pub enum Request {
 }
 
 impl Request {
+    fn action(&self) -> u32 {
+        match self {
+            Self::Connect => ACTION_CONNECT,
+            Self::Announce(..) => ACTION_ANNOUNCE,
+        }
+    }
+
     pub fn serialize(
         &self,
         transaction_id: TransactionId,
@@ -239,7 +246,37 @@ struct ConnectionIdMeta {
 #[derive(Default)]
 struct ClientLocked {
     connections: HashMap<SocketAddr, ConnectionIdMeta>,
-    transactions: HashMap<TransactionId, tokio::sync::oneshot::Sender<Response>>,
+    transactions: HashMap<TransactionId, PendingTransaction>,
+}
+
+struct PendingTransaction {
+    endpoint: SocketAddr,
+    action: u32,
+    // Keep the slot reserved until its guard drops, even after delivering a
+    // response. Otherwise a new request could reuse the ID before the old guard
+    // removes it and inadvertently cancel that new request.
+    sender: Option<tokio::sync::oneshot::Sender<Response>>,
+}
+
+impl ClientLocked {
+    fn deliver(&mut self, tid: TransactionId, addr: SocketAddr, response: Response) {
+        let Some(pending) = self.transactions.get_mut(&tid) else {
+            return;
+        };
+        if pending.endpoint != addr
+            || !matches!(
+                (&response, pending.action),
+                (Response::Connect(_), ACTION_CONNECT)
+                    | (Response::Announce(_), ACTION_ANNOUNCE)
+                    | (Response::Error(_), _)
+            )
+        {
+            return;
+        }
+        if let Some(sender) = pending.sender.take() {
+            let _ = sender.send(response);
+        }
+    }
 }
 
 struct ClientShared {
@@ -313,20 +350,9 @@ impl UdpTrackerClient {
                 }
             };
 
-            trace!(?tid, ?response, ?addr, "received");
+            trace!(?tid, ?addr, "received UDP tracker response");
 
-            let t = self.state.locked.write().transactions.remove(&tid);
-            match t {
-                Some(tx) => match tx.send(response) {
-                    Ok(_) => {}
-                    Err(_) => {
-                        debug!(tid, "reader dead");
-                    }
-                },
-                None => {
-                    debug!(tid, "nowhere to send response");
-                }
-            };
+            self.state.locked.write().deliver(tid, addr, response);
         }
     }
 
@@ -355,7 +381,7 @@ impl UdpTrackerClient {
 
     async fn request(&self, addr: SocketAddr, request: Request) -> anyhow::Result<Response> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let tid_g = self.reserve_transaction_id(tx)?;
+        let tid_g = self.reserve_transaction_id(addr, request.action(), tx)?;
 
         let mut write_buf = [0u8; 1024];
         let len = request.serialize(tid_g.tid, &mut write_buf)?;
@@ -383,6 +409,8 @@ impl UdpTrackerClient {
 
     fn reserve_transaction_id(
         &self,
+        endpoint: SocketAddr,
+        action: u32,
         tx: tokio::sync::oneshot::Sender<Response>,
     ) -> anyhow::Result<TransactionIdGuard<'_>> {
         let mut g = self.state.locked.write();
@@ -391,7 +419,16 @@ impl UdpTrackerClient {
             match g.transactions.entry(t) {
                 Entry::Occupied(_) => continue,
                 Entry::Vacant(vac) => {
-                    vac.insert(tx);
+                    vac.insert(PendingTransaction {
+                        endpoint: match endpoint {
+                            SocketAddr::V6(v6) if v6.ip().to_ipv4_mapped().is_some() => {
+                                SocketAddr::new(v6.ip().to_ipv4_mapped().unwrap().into(), v6.port())
+                            }
+                            other => other,
+                        },
+                        action,
+                        sender: Some(tx),
+                    });
                     return Ok(TransactionIdGuard {
                         tid: t,
                         state: &self.state,
@@ -426,6 +463,165 @@ mod tests {
     use crate::tracker_comms_udp::{
         AnnounceFields, EVENT_NONE, Request, Response, new_transaction_id,
     };
+
+    use super::{
+        ACTION_ANNOUNCE, ACTION_CONNECT, ClientLocked, PendingTransaction, UdpTrackerClient,
+    };
+    use std::net::SocketAddr;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn invalid_datagrams_leave_transaction_available() {
+        for endpoint in ["127.0.0.1:1000", "[::1]:1000"] {
+            let addr: SocketAddr = endpoint.parse().unwrap();
+            let (tx, mut rx) = tokio::sync::oneshot::channel();
+            let mut state = ClientLocked::default();
+            state.transactions.insert(
+                7,
+                PendingTransaction {
+                    endpoint: addr,
+                    action: ACTION_CONNECT,
+                    sender: Some(tx),
+                },
+            );
+            state.deliver(6, addr, Response::Connect(99)); // unknown ID
+            let mut wrong = addr;
+            wrong.set_port(1001);
+            state.deliver(7, wrong, Response::Connect(99));
+            wrong.set_ip(if addr.is_ipv4() {
+                "127.0.0.2".parse().unwrap()
+            } else {
+                "::2".parse().unwrap()
+            });
+            wrong.set_port(1000);
+            state.deliver(7, wrong, Response::Error("untrusted".into()));
+            state.deliver(
+                7,
+                addr,
+                Response::Announce(super::AnnounceResponse {
+                    interval: 60,
+                    leechers: 0,
+                    seeders: 0,
+                    addrs: vec![],
+                }),
+            );
+            state.deliver(7, addr, Response::Unknown);
+            assert!(matches!(
+                rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            state.deliver(7, addr, Response::Connect(42));
+            assert!(matches!(rx.await.unwrap(), Response::Connect(42)));
+            assert!(
+                state.transactions.contains_key(&7),
+                "guard retains ID reservation"
+            );
+            state.deliver(7, addr, Response::Connect(99)); // duplicate is ignored
+            state.transactions.remove(&7); // request/guard completion
+            state.deliver(7, addr, Response::Connect(99)); // late response
+            let (tx, mut rx) = tokio::sync::oneshot::channel();
+            state.transactions.insert(
+                7,
+                PendingTransaction {
+                    endpoint: wrong,
+                    action: ACTION_ANNOUNCE,
+                    sender: Some(tx),
+                },
+            );
+            state.deliver(7, addr, Response::Error("old endpoint".into()));
+            assert!(matches!(
+                rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            state.deliver(7, wrong, Response::Error("expected tracker".into()));
+            assert!(matches!(rx.await.unwrap(), Response::Error(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn loopback_ipv4_and_ipv6_reject_wrong_port_and_action() {
+        for bind in ["127.0.0.1:0", "[::1]:0"] {
+            let tracker = tokio::net::UdpSocket::bind(bind).await.unwrap();
+            let impostor = tokio::net::UdpSocket::bind(bind).await.unwrap();
+            let token = CancellationToken::new();
+            let client = UdpTrackerClient::new(token.clone(), None).await.unwrap();
+            let addr = tracker.local_addr().unwrap();
+            let task = tokio::spawn(async move { client.request(addr, Request::Connect).await });
+            let mut packet = [0; 1024];
+            let (len, destination) = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                tracker.recv_from(&mut packet),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(len, 16);
+            let tid = &packet[12..16];
+            let response = |action: u32, payload: &[u8]| {
+                [action.to_be_bytes().as_slice(), tid, payload].concat()
+            };
+            impostor
+                .send_to(&response(ACTION_CONNECT, &99u64.to_be_bytes()), destination)
+                .await
+                .unwrap();
+            tracker
+                .send_to(&response(ACTION_ANNOUNCE, &[0; 12]), destination)
+                .await
+                .unwrap();
+            tracker
+                .send_to(&response(ACTION_CONNECT, &[0; 2]), destination)
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            assert!(
+                !task.is_finished(),
+                "unsolicited packets must not consume the request"
+            );
+            tracker
+                .send_to(&response(ACTION_CONNECT, &42u64.to_be_bytes()), destination)
+                .await
+                .unwrap();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(matches!(result, Response::Connect(42)));
+            token.cancel();
+        }
+    }
+
+    #[tokio::test]
+    async fn reservation_survives_delivery_and_is_released_on_drop() {
+        let token = CancellationToken::new();
+        let client = UdpTrackerClient::new(token.clone(), None).await.unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let guard = client
+            .reserve_transaction_id(
+                "[::ffff:127.0.0.1]:1234".parse().unwrap(),
+                ACTION_CONNECT,
+                tx,
+            )
+            .unwrap();
+        let tid = guard.tid;
+        client.state.locked.write().deliver(
+            tid,
+            "127.0.0.1:1234".parse().unwrap(),
+            Response::Connect(1),
+        );
+        assert!(matches!(rx.await.unwrap(), Response::Connect(1)));
+        assert!(client.state.locked.read().transactions.contains_key(&tid));
+        drop(guard);
+        assert!(!client.state.locked.read().transactions.contains_key(&tid));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let guard = client
+            .reserve_transaction_id("127.0.0.1:1234".parse().unwrap(), ACTION_CONNECT, tx)
+            .unwrap();
+        drop(guard); // cancellation before any response
+        assert!(rx.await.is_err());
+        assert!(client.state.locked.read().transactions.is_empty());
+        token.cancel();
+    }
 
     #[test]
     fn test_parse_announce() {

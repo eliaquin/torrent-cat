@@ -6,8 +6,8 @@ Las referencias de líneas de la auditoría describen el commit base, no el cód
 
 | Hallazgo | Estado | Evidencia |
 | --- | --- | --- |
-| F1 — aislamiento de archivos | Implementado y revisado; 35 pruebas pasan, 1 de red pública ignorada | `tests/storage_confinement.rs` |
-| F2 — asociación de respuestas UDP | Pendiente | |
+| F1 — aislamiento de archivos | Integrado en `df35676` y publicado; 35 pruebas pasan, 1 ignorada | `tests/storage_confinement.rs` |
+| F2 — asociación de respuestas UDP | Implementado y revisado; validación local | Pruebas UDP del crate y `tracker_tests` |
 | F3 — límites de entradas | Pendiente | |
 | F4 — integridad y durabilidad de reanudación | Pendiente | |
 | F5 — capacidad, cancelación y equidad de subida | Pendiente | |
@@ -31,3 +31,13 @@ Self-review: la primera implementación tenía un bypass de `O_NOFOLLOW` cuando 
 Pruebas: enlaces absolutos y relativos de archivo/directorio, creación y reutilización, raíz simbólica, restauración, sustitución de raíz/descendiente antes de borrar, y 500 aperturas/escrituras/borrados durante intercambios concurrentes. Los archivos externos conservan contenido, tamaño y existencia. Todas las pruebas utilizan directorios temporales sin trackers externos.
 
 Validación final: `cargo test --manifest-path src-tauri/Cargo.toml --locked` — 29 pruebas de aplicación y 6 regresiones de almacenamiento pasan; una prueba de red pública ignorada. `cargo check` y `git diff --check` pasan. Sin hallazgos bloqueantes restantes en el diff F1.
+
+## F2: asociación de respuestas UDP
+
+Cada transacción reserva endpoint (IP y puerto), acción y receptor. Los mensajes malformados, de otro endpoint o de otra acción no consumen la transacción. Los errores del tracker se aceptan solo desde el endpoint esperado. Los errores remotos ya no se imprimen en la traza de recepción.
+
+Self-review: mantener el ID reservado hasta que desaparezca su guard evita que la limpieza de una solicitud anterior elimine una nueva que haya reutilizado ese número. Se normalizan IPv4 mapeadas porque el socket dual-stack entrega IPv4 nativas; las IPv6 conservan su scope. La asociación no autentica UDP ni puede distinguir un replay idéntico desde el mismo endpoint si coincide de nuevo el ID aleatorio; no se afirma esa garantía.
+
+Regresiones: IP/puerto/acción incorrectos, mensaje truncado, respuesta legítima posterior, ID desconocido, duplicado/tardío, reserva/reutilización y cancelación. Pruebas de socket reales en loopback IPv4 e IPv6. Referencia: [BEP 15](https://www.bittorrent.org/beps/bep_0015.html).
+
+Validación final F2: `cargo test --manifest-path src-tauri/Cargo.toml --locked -p librqbit-tracker-comms --lib` — 7 pasan, 1 de red pública ignorada. `cargo test --manifest-path src-tauri/Cargo.toml --locked tracker_tests` — 9 pasan. Diff revisado sin hallazgos bloqueantes; `git diff --check` pasa.
