@@ -185,6 +185,53 @@ pub enum AddIncomingPeerResult {
     ConcurrencyLimitReached,
 }
 
+#[derive(Default)]
+struct PexControl {
+    enabled: AtomicBool,
+    started: AtomicBool,
+}
+impl PexControl {
+    fn update(&self, id: Option<u8>) -> bool {
+        let Some(id) = id else {
+            return false;
+        };
+        self.enabled.store(id != 0, Ordering::Release);
+        id != 0 && !self.started.swap(true, Ordering::AcqRel)
+    }
+}
+fn pex_address_allowed(recipient: SocketAddr, address: SocketAddr) -> bool {
+    fn local(ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(ip) => {
+                ip.is_loopback()
+                    || ip.is_private()
+                    || ip.is_link_local()
+                    || (ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]))
+            }
+            IpAddr::V6(ip) => ip
+                .to_ipv4_mapped()
+                .map(|ip| local(ip.into()))
+                .unwrap_or_else(|| {
+                    ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+                }),
+        }
+    }
+    let ip = match address.ip() {
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
+        other => other,
+    };
+    if address == recipient || address.port() == 0 || ip.is_unspecified() || ip.is_multicast() {
+        return false;
+    }
+    if matches!(ip, IpAddr::V4(ip) if ip.is_broadcast()) {
+        return false;
+    }
+    local(recipient.ip()) || !local(address.ip())
+}
+
 struct PeerEpoch {
     cancel: CancellationToken,
     tasks: tokio_util::task::TaskTracker,
@@ -523,6 +570,7 @@ impl TorrentStateLive {
     ) -> crate::Result<()> {
         let handler = PeerHandler {
             epoch: epoch.clone(),
+            pex: Arc::new(PexControl::default()),
             uploads: crate::upload_queue::PeerUploads::new(self.upload_slots.clone()),
             addr: checked_peer.addr,
             incoming: true,
@@ -592,6 +640,7 @@ impl TorrentStateLive {
 
         let handler = PeerHandler {
             epoch: epoch.clone(),
+            pex: Arc::new(PexControl::default()),
             uploads: crate::upload_queue::PeerUploads::new(state.upload_slots.clone()),
             addr,
             incoming: false,
@@ -1020,6 +1069,7 @@ impl TorrentStateLive {
         self: Arc<Self>,
         this_peer_addr: SocketAddr,
         tx: PeerTx,
+        control: Arc<PexControl>,
     ) -> anyhow::Result<()> {
         // As per BEP 11 we should not send more than 50 peers at once
         // (here it also applies to fist message, should be OK as we anyhow really have more)
@@ -1034,10 +1084,11 @@ impl TorrentStateLive {
         // Wait 10 seconds before sending the first message to assure that peer will stay with us
         tokio::time::sleep(Duration::from_secs(10)).await;
 
-        let mut interval = tokio::time::interval(PEX_MESSAGE_INTERVAL);
-
         loop {
-            interval.tick().await;
+            if !control.enabled.load(Ordering::Acquire) {
+                tokio::time::sleep(PEX_MESSAGE_INTERVAL).await;
+                continue;
+            }
 
             // This task should die with the cancellation token, but check defensively just in case.
             if tx.is_closed() {
@@ -1052,6 +1103,7 @@ impl TorrentStateLive {
                 connected.extend(
                     live_peers
                         .difference(&peer_view_of_live_peers)
+                        .filter(|address| pex_address_allowed(this_peer_addr, **address))
                         .take(MAX_SENT_PEERS)
                         .copied(),
                 );
@@ -1065,20 +1117,6 @@ impl TorrentStateLive {
 
             trace!(connected_len = connected.len(), dropped_len = dropped.len());
 
-            let peer_ip_non_local = match this_peer_addr.ip() {
-                IpAddr::V4(a) => !a.is_loopback() && !a.is_private(),
-                IpAddr::V6(a) => !a.is_loopback() && !a.is_unique_local(),
-            };
-
-            let other_ip_is_local = |addr: &IpAddr| match addr {
-                IpAddr::V4(a) => a.is_loopback() || a.is_private(),
-                IpAddr::V6(a) => {
-                    a.is_loopback() || a.is_unicast_link_local() || a.is_unique_local()
-                }
-            };
-
-            let filter = |addr: &SocketAddr| !(peer_ip_non_local && other_ip_is_local(&addr.ip()));
-
             // BEP 11 - Dont send closed if they are now in live
             // it's assured by mutual exclusion of two  above sets  if in sent_peers_live, it cannot be in addrs_live_to_sent,
             // and addrs_closed_to_sent are only filtered addresses from sent_peers_live
@@ -1088,15 +1126,23 @@ impl TorrentStateLive {
                     connected.iter().copied(),
                     dropped.iter().copied(),
                 );
-                if tx.send(WriterRequest::UtPex(pex_msg)).is_err() {
-                    return Ok(()); // Peer disconnected
+                let (reply, written) = tokio::sync::oneshot::channel();
+                if tx.send(WriterRequest::UtPex(pex_msg, reply)).is_err() {
+                    return Ok(());
                 }
-
-                for addr in &dropped {
-                    peer_view_of_live_peers.remove(addr);
+                match written.await {
+                    Ok(true) => {
+                        for addr in &dropped {
+                            peer_view_of_live_peers.remove(addr);
+                        }
+                        peer_view_of_live_peers.extend(connected.iter().copied());
+                    }
+                    Ok(false) => {} // Disabled before dispatch; nothing was advertised.
+                    Err(_) => return Ok(()),
                 }
-                peer_view_of_live_peers.extend(connected.iter().filter(|a| filter(a)).copied());
             }
+            // Rate from actual writes, not enqueue times; never catch up missed ticks.
+            tokio::time::sleep(PEX_MESSAGE_INTERVAL).await;
         }
     }
 }
@@ -1120,6 +1166,7 @@ impl Default for PeerFlowControl {
 // All peer state that would never be used by other actors should pe put here.
 // This state tracks a live peer.
 struct PeerHandler {
+    pex: Arc<PexControl>,
     epoch: Arc<PeerEpoch>,
     uploads: Arc<crate::upload_queue::PeerUploads>,
     state: Arc<TorrentStateLive>,
@@ -1303,7 +1350,7 @@ impl PeerConnectionHandler for &'_ PeerHandler {
             }
         }
 
-        if !self.state.metadata.info.info().private && hs.m.ut_pex.is_some() {
+        if !self.state.metadata.info.info().private && self.pex.update(hs.m.ut_pex) {
             spawn_with_cancel(
                 debug_span!(
                     parent: self.state.shared.span.clone(),
@@ -1315,9 +1362,11 @@ impl PeerConnectionHandler for &'_ PeerHandler {
                     self.state.shared.id, self.addr
                 ),
                 self.cancel_token.clone(),
-                self.state
-                    .clone()
-                    .task_send_pex_to_peer(self.addr, self.tx.clone()),
+                self.state.clone().task_send_pex_to_peer(
+                    self.addr,
+                    self.tx.clone(),
+                    self.pex.clone(),
+                ),
             );
         }
         // Lets update outgoing Socket address for incoming connection
@@ -2252,4 +2301,80 @@ fn format_peer_client_name(value: &ByteBuf<'_>) -> Option<String> {
     }
 
     Some(client_name)
+}
+
+#[cfg(test)]
+mod pex_tests {
+    use super::*;
+    #[test]
+    fn repeated_enable_disable_and_reenable_start_only_one_worker() {
+        let control = PexControl::default();
+        assert!(!control.update(None));
+        assert!(!control.update(Some(0)));
+        assert!(control.update(Some(7)));
+        for _ in 0..1000 {
+            assert!(!control.update(Some(7)));
+        }
+        assert!(control.enabled.load(Ordering::Acquire));
+        assert!(!control.update(Some(0)));
+        assert!(!control.enabled.load(Ordering::Acquire));
+        assert!(!control.update(None));
+        assert!(!control.enabled.load(Ordering::Acquire));
+        assert!(!control.update(Some(8)));
+        assert!(control.enabled.load(Ordering::Acquire));
+    }
+    #[test]
+    fn public_recipients_never_receive_local_contacts_in_pex_payloads() {
+        let recipient: SocketAddr = "8.8.8.8:1".parse().unwrap();
+        let candidates: Vec<SocketAddr> = [
+            "127.0.0.1:1",
+            "192.168.1.2:1",
+            "10.0.0.1:1",
+            "169.254.1.1:1",
+            "100.64.1.1:1",
+            "[::ffff:10.0.0.1]:1",
+            "[::ffff:0.0.0.0]:1",
+            "[::ffff:224.0.0.1]:1",
+            "[::ffff:255.255.255.255]:1",
+            "[::1]:1",
+            "[fe80::1]:1",
+            "[fc00::1]:1",
+            "0.0.0.0:1",
+            "224.0.0.1:1",
+            "255.255.255.255:1",
+            "8.8.8.8:1",
+            "1.1.1.1:0",
+            "1.1.1.1:6881",
+            "[2606:4700:4700::1111]:6881",
+        ]
+        .into_iter()
+        .map(|s| s.parse().unwrap())
+        .collect();
+        let message = extended::ut_pex::UtPex::from_addrs(
+            candidates
+                .iter()
+                .copied()
+                .filter(|a| pex_address_allowed(recipient, *a)),
+            std::iter::empty(),
+        );
+        let mut encoded = Vec::new();
+        bencode::bencode_serialize_to_writer(message.as_borrowed(), &mut encoded).unwrap();
+        let decoded: extended::ut_pex::UtPex<ByteBuf> = bencode::from_bytes(&encoded).unwrap();
+        let advertised: HashSet<_> = decoded.added_peers().map(|p| p.addr).collect();
+        assert_eq!(
+            advertised,
+            HashSet::from([
+                "1.1.1.1:6881".parse().unwrap(),
+                "[2606:4700:4700::1111]:6881".parse().unwrap()
+            ])
+        );
+        assert!(pex_address_allowed(
+            "192.168.1.1:1".parse().unwrap(),
+            "192.168.1.2:2".parse().unwrap()
+        ));
+        assert!(!pex_address_allowed(
+            "[::ffff:8.8.8.8]:1".parse().unwrap(),
+            "[::ffff:192.168.1.2]:1".parse().unwrap()
+        ));
+    }
 }

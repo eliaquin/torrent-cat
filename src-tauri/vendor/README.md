@@ -1,6 +1,6 @@
 # Patched rqbit components
 
-`librqbit`, `librqbit-tracker-comms` and `librqbit-bencode` are vendored from the published 9.0.1 crates,
+`librqbit`, `librqbit-tracker-comms`, `librqbit-bencode` and `librqbit-peer-protocol` are vendored from the published 9.0.1 crates,
 upstream [ikatson/rqbit](https://github.com/ikatson/rqbit) commit
 `a499d2f243d124e144aef137afe7cb304a6e3f36`.
 All retain their Apache-2.0 license; see `LICENSE-APACHE` in each directory.
@@ -35,6 +35,8 @@ TorrentCat modifications:
 - Resolve unknown magnets through an explicit tracker only; require the original
   `.torrent` file for private torrents. Unknown magnets cannot switch trackers
   before peer isolation is available.
+- Apply additive extension updates and zero-ID disablement. Keep one PEX worker
+  per peer, avoid timer catch-up bursts and filter local contacts before encoding.
 - Avoid logging tracker URLs, passkeys or tracker failure text in announce errors.
 
 Changes include the component `Cargo.toml` files, `librqbit/src/session.rs`,
@@ -48,6 +50,8 @@ HTTP reader is `librqbit-tracker-comms/src/http_body.rs`. Checkpoint/recheck cha
 `storage/filesystem/opened_file.rs` and `torrent_state/initializing.rs`.
 Upload changes also touch `upload_queue.rs`, `peer_connection.rs`, `limits.rs` and
 `torrent_state/live/peer/mod.rs`.
+Extension parser/serializer changes are in `librqbit-peer-protocol/src/extended/`.
+That crate omits the upstream benchmark target and Criterion dev dependency.
 Other vendored sources retain their upstream implementation.
 
 Regression tests live in `../src/tracker_tests.rs` and
@@ -56,7 +60,7 @@ loopback HTTP/UDP trackers and loopback peers:
 
 ```sh
 cargo test --manifest-path src-tauri/Cargo.toml --locked
-cargo test --manifest-path src-tauri/Cargo.toml --locked -p librqbit-bencode -p librqbit-tracker-comms --lib
+cargo test --manifest-path src-tauri/Cargo.toml --locked -p librqbit-bencode -p librqbit-tracker-comms -p librqbit-peer-protocol --lib
 cargo test --manifest-path src-tauri/Cargo.toml --locked -p librqbit --lib --no-default-features --features rust-tls -- --skip tests::e2e
 ```
 

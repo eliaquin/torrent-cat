@@ -60,7 +60,9 @@ librqbit = { path = "vendor/librqbit" }
 librqbit-tracker-comms = { path = "vendor/librqbit-tracker-comms" }
 librqbit-bencode = { path = "vendor/librqbit-bencode" }
 
+librqbit-peer-protocol = { path = "vendor/librqbit-peer-protocol" }
+
 [workspace]
-members = ["vendor/librqbit", "vendor/librqbit-tracker-comms", "vendor/librqbit-bencode"]
+members = ["vendor/librqbit", "vendor/librqbit-tracker-comms", "vendor/librqbit-bencode", "vendor/librqbit-peer-protocol"]
 default-members = ["."]
 resolver = "3"
