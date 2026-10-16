@@ -2,7 +2,7 @@ import { useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
 
 /** A wrapping tooltip stays readable even when its title is clipped by a card. */
-export function FullName({ name }: { name: string }) {
+export function FullName({ name, dragRegion = false }: { name: string; dragRegion?: boolean }) {
   const id = useId();
   const [anchor, setAnchor] = useState<{ left: number; top: number; above: boolean } | null>(null);
   useEffect(() => {
@@ -15,7 +15,7 @@ export function FullName({ name }: { name: string }) {
       window.removeEventListener("resize", hide);
     };
   }, [anchor]);
-  return <span className="full-name" aria-describedby={anchor ? id : undefined}
+  return <span className="full-name" data-tauri-drag-region={dragRegion || undefined} aria-describedby={anchor ? id : undefined}
     onPointerEnter={(event) => {
       const box = event.currentTarget.getBoundingClientRect();
       const width = Math.min(640, window.innerWidth - 24);

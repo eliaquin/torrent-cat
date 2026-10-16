@@ -280,7 +280,7 @@ function App() {
         </nav>
         <div className="title" data-tauri-drag-region>
           {page === "player"
-            ? <FullName name={playing?.name || ""} />
+            ? <FullName name={playing?.name || ""} dragRegion />
             : page === "create"
               ? "Create torrent"
               : ""}

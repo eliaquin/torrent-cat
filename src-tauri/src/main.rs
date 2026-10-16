@@ -296,6 +296,10 @@ async fn native_close(window: tauri::WebviewWindow) -> Cmd<Value> {
     on_main(window, move |_| native::close()).await
 }
 #[tauri::command]
+async fn fit_video_window(window: tauri::WebviewWindow, width: f64, height: f64) -> Cmd<Value> {
+    on_main(window, move |host| native::fit_window(host, width, height)).await
+}
+#[tauri::command]
 async fn native_resize(window: tauri::WebviewWindow, rect: native::Rect) -> Cmd<Value> {
     on_main(window, move |host| native::resize(host, rect)).await
 }
@@ -495,6 +499,7 @@ fn main() {
             native_subtitle,
             native_close,
             native_resize,
+            fit_video_window,
             native_action,
             take_inputs
         ])

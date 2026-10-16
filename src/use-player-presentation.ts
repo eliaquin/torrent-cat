@@ -13,8 +13,9 @@ export function usePlayerPresentation(
   const interaction = useRef({
     hovered: false, focused: false, dragging: false, lastActivity: Date.now(),
   });
-  const state = useRef({ fullscreen, paused, blocked });
-  state.current = { fullscreen, paused, blocked };
+  const state = useRef({ paused, blocked });
+  state.current = { paused, blocked };
+  const controlsHidden = hidden && !paused && !blocked;
   const transitioning = useRef(false);
   const show = useCallback(() => {
     interaction.current.lastActivity = Date.now();
@@ -55,17 +56,32 @@ export function usePlayerPresentation(
     document.documentElement.classList.toggle("native-playback", native);
     return () => document.documentElement.classList.remove("native-playback");
   }, [native]);
+  useEffect(() => {
+    document.documentElement.classList.toggle("player-controls-hidden", controlsHidden);
+    return () => document.documentElement.classList.remove("player-controls-hidden");
+  }, [controlsHidden]);
 
   useEffect(() => {
-    const move = () => show();
+    const chrome = ".view-player > .header, .player-toolbar, .player-bottom";
+    const move = (event: PointerEvent) => {
+      interaction.current.hovered = !!(event.target as Element)?.closest(chrome);
+      show();
+    };
     const down = (event: PointerEvent) => {
       interaction.current.dragging = !!(event.target as Element)?.closest(
-        ".player-toolbar, .player-bottom",
+        chrome,
       );
       show();
     };
     const up = () => { interaction.current.dragging = false; show(); };
+    const leave = () => { interaction.current.hovered = false; show(); };
+    const focus = (event: FocusEvent) => {
+      const target = event.target as HTMLElement;
+      setInteraction("focused", !!target.closest(chrome) && target.matches(":focus-visible"));
+    };
     document.addEventListener("pointermove", move);
+    document.addEventListener("pointerleave", leave);
+    document.addEventListener("focusin", focus);
     document.addEventListener("pointerdown", down);
     document.addEventListener("pointerup", up);
     document.addEventListener("pointercancel", up);
@@ -76,6 +92,8 @@ export function usePlayerPresentation(
     }, 100);
     return () => {
       document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerleave", leave);
+      document.removeEventListener("focusin", focus);
       document.removeEventListener("pointerdown", down);
       document.removeEventListener("pointerup", up);
       document.removeEventListener("pointercancel", up);
@@ -101,7 +119,7 @@ export function usePlayerPresentation(
 
   return {
     fullscreen,
-    hidden: fullscreen && hidden && !paused && !blocked,
+    hidden: controlsHidden,
     changeFullscreen,
     show,
     chromeEvents: {

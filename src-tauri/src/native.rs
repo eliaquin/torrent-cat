@@ -12,6 +12,57 @@ use std::{
     sync::Mutex,
 };
 static PLAYER: Mutex<Option<Player>> = Mutex::new(None);
+static WINDOW_FIT: Mutex<Option<(NSSize, NSSize)>> = Mutex::new(None);
+
+fn fitted_size(current: NSSize, minimum: NSSize, maximum: NSSize, ratio: f64) -> NSSize {
+    let max_width = maximum.width.min(maximum.height * ratio);
+    let min_width = minimum.width.max(minimum.height * ratio).min(max_width);
+    let width = current.width.max(min_width).min(max_width);
+    NSSize::new(width, width / ratio)
+}
+
+pub fn fit_window(host: usize, width: f64, height: f64) -> Result<Value> {
+    if !width.is_finite() || !height.is_finite() || width < 0.0 || height < 0.0 {
+        bail!("Invalid video dimensions");
+    }
+    unsafe {
+        let host = host as *mut AnyObject;
+        let window: *mut AnyObject = msg_send![host, window];
+        let mut saved = WINDOW_FIT.lock().unwrap();
+        if width == 0.0 || height == 0.0 {
+            if let Some((minimum, aspect)) = saved.take() {
+                let _: () = msg_send![window, setContentAspectRatio: aspect];
+                let _: () = msg_send![window, setContentMinSize: minimum];
+            }
+            return Ok(json!({}));
+        }
+        let screen: *mut AnyObject = msg_send![window, screen];
+        if screen.is_null() { return Ok(json!({})); }
+        let visible: NSRect = msg_send![screen, visibleFrame];
+        let bounds: NSRect = msg_send![host, bounds];
+        let mut frame: NSRect = msg_send![window, frame];
+        let minimum: NSSize = msg_send![window, contentMinSize];
+        let aspect: NSSize = msg_send![window, contentAspectRatio];
+        let (minimum, _) = *saved.get_or_insert((minimum, aspect));
+        let ratio = width / height;
+        if !ratio.is_finite() || ratio <= 0.0 { bail!("Invalid video aspect ratio"); }
+        let _: () = msg_send![window, setContentAspectRatio: NSSize::new(ratio, 1.0)];
+        // Fullscreen is controlled by macOS; fit again after returning windowed.
+        let style: usize = msg_send![window, styleMask];
+        if style & (1 << 14) != 0 { return Ok(json!({})); }
+        let chrome = NSSize::new(frame.size.width - bounds.size.width, frame.size.height - bounds.size.height);
+        let maximum = NSSize::new((visible.size.width - chrome.width).max(1.0), (visible.size.height - chrome.height).max(1.0));
+        let size = fitted_size(bounds.size, minimum, maximum, ratio);
+        let player_min = fitted_size(NSSize::new(0.0, 0.0), minimum, maximum, ratio);
+        let _: () = msg_send![window, setContentMinSize: player_min];
+        let top = frame.origin.y + frame.size.height;
+        frame.size = NSSize::new(size.width + chrome.width, size.height + chrome.height);
+        frame.origin.x = frame.origin.x.max(visible.origin.x).min(visible.origin.x + visible.size.width - frame.size.width);
+        frame.origin.y = (top - frame.size.height).max(visible.origin.y).min(visible.origin.y + visible.size.height - frame.size.height);
+        let _: () = msg_send![window, setFrame: frame, display: true];
+    }
+    Ok(json!({}))
+}
 struct Player {
     _core: Library,
     lib: Library,
@@ -334,8 +385,12 @@ pub fn action(action: &str, value: f64) -> Result<Value> {
             s, "libvlc_video_get_spu",
             unsafe extern "C" fn(*mut c_void) -> i32, p
         );
+        let (mut width, mut height) = (0u32, 0u32);
+        let _ = call!(s, "libvlc_video_get_size",
+            unsafe extern "C" fn(*mut c_void, u32, *mut u32, *mut u32) -> i32,
+            p, 0, &mut width, &mut height);
         Ok(
-            json!({"time":(time.max(0) as f64)/1000.0,"duration":(length.max(0) as f64)/1000.0,"state":state,"audio":tracks(s,false)?,"subtitles":tracks(s,true)?,"audioTrack":audio_track,"subtitleTrack":subtitle_track}),
+            json!({"time":(time.max(0) as f64)/1000.0,"duration":(length.max(0) as f64)/1000.0,"state":state,"width":width,"height":height,"audio":tracks(s,false)?,"subtitles":tracks(s,true)?,"audioTrack":audio_track,"subtitleTrack":subtitle_track}),
         )
     }
 }
@@ -400,4 +455,30 @@ pub fn subtitle(url: String) -> Result<Value> {
         }
     }
     Ok(json!({}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn widescreen_fits_existing_width_without_cropping() {
+        let size = fitted_size(NSSize::new(1612.0, 1062.0), NSSize::new(660.0, 480.0), NSSize::new(3440.0, 1380.0), 16.0 / 9.0);
+        assert_eq!(size.width, 1612.0);
+        assert!((size.height - 906.75).abs() < 0.01);
+    }
+
+    #[test]
+    fn portrait_video_fits_on_screen_even_when_library_minimum_is_too_wide() {
+        let size = fitted_size(NSSize::new(1612.0, 1062.0), NSSize::new(660.0, 480.0), NSSize::new(1920.0, 1000.0), 9.0 / 16.0);
+        assert_eq!(size, NSSize::new(562.5, 1000.0));
+    }
+
+    #[test]
+    fn small_window_preserves_minimum_height_and_video_proportions() {
+        let ratio = 16.0 / 9.0;
+        let size = fitted_size(NSSize::new(660.0, 480.0), NSSize::new(660.0, 480.0), NSSize::new(1920.0, 1000.0), ratio);
+        assert_eq!(size.height, 480.0);
+        assert!((size.width / size.height - ratio).abs() < 0.0001);
+    }
 }

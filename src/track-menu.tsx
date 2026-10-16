@@ -3,9 +3,11 @@ import { Icon } from "./ui";
 
 export type TrackOption = { id: number; name: string; detail?: string };
 
-export function TrackMenu({ tracks, selected, disabled, onSelect, onOpenChange, label, icon, onAddFile }: {
-  label: "Audio" | "Subtitles";
-  icon: string;
+export function TrackMenu({ tracks, selected, disabled, onSelect, onOpenChange, label, icon, onAddFile, triggerLabel, className = "" }: {
+  label: "Audio" | "Subtitles" | "Playback speed";
+  triggerLabel?: string;
+  className?: string;
+  icon?: string;
   onAddFile?: () => void;
   tracks: TrackOption[];
   selected: number;
@@ -19,6 +21,8 @@ export function TrackMenu({ tracks, selected, disabled, onSelect, onOpenChange, 
   const menu = useRef<HTMLDivElement>(null);
   const id = useId();
   const active = tracks.find((track) => track.id === selected);
+  const heading = label === "Audio" ? "Audio tracks" : label;
+  const controlLabel = label === "Audio" ? "Audio track" : label === "Subtitles" ? "Subtitle track" : label;
   const close = () => { setOpen(false); trigger.current?.focus(); };
 
   useEffect(() => {
@@ -39,10 +43,10 @@ export function TrackMenu({ tracks, selected, disabled, onSelect, onOpenChange, 
   }, [open]);
 
   return (
-    <div className="audio-track-control" ref={root}>
+    <div className={`audio-track-control ${className}`} ref={root}>
       <button
         ref={trigger} className="audio-track-trigger" type="button"
-        aria-label={`${label === "Audio" ? "Audio track" : "Subtitle track"}: ${active?.name || "Off"}`}
+        aria-label={`${controlLabel}: ${active?.name || "Off"}`}
         aria-haspopup="menu" aria-expanded={open} aria-controls={open ? id : undefined}
         disabled={disabled}
         onClick={() => setOpen(!open)}
@@ -52,12 +56,12 @@ export function TrackMenu({ tracks, selected, disabled, onSelect, onOpenChange, 
           }
         }}
       >
-        {disabled ? <span className="spinner" /> : <Icon name={icon} />}
-        <span>{disabled ? "Preparing…" : label}</span>
+        {disabled ? <span className="spinner" /> : icon ? <Icon name={icon} /> : null}
+        <span>{disabled ? "Preparing…" : triggerLabel ?? label}</span>
         <Icon name="expand_less" />
       </button>
       {open && (
-        <div id={id} ref={menu} className="audio-track-menu" role="menu" aria-label={label === "Audio" ? "Audio tracks" : "Subtitles"}
+        <div id={id} ref={menu} className="audio-track-menu" role="menu" aria-label={heading}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
               event.preventDefault(); event.stopPropagation(); close();
@@ -71,7 +75,7 @@ export function TrackMenu({ tracks, selected, disabled, onSelect, onOpenChange, 
             } else if (event.key === "Tab") close();
           }}
         >
-          <div className="audio-track-heading" role="presentation"><span>{label === "Audio" ? "Audio tracks" : "Subtitles"}</span><span>{tracks.length}</span></div>
+          <div className="audio-track-heading" role="presentation"><span>{heading}</span><span>{tracks.length}</span></div>
           {tracks.map((track) => (
             <button key={track.id} type="button" role="menuitemradio" aria-checked={track.id === selected}
               tabIndex={-1} onClick={() => { close(); onSelect(track.id); }}>

@@ -764,6 +764,8 @@ a {
   color: var(--shelf-text);
 }
 .header {
+  -webkit-user-select: none;
+  user-select: none;
   background: #17191d;
   height: 46px;
   flex-shrink: 0;
@@ -1085,15 +1087,25 @@ html.native-playback,
 .native-playback .video-surface {
   background: transparent;
 }
-.player-fullscreen .view-player > .header {
-  display: none;
+.view-player > .header {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 3;
+  background: rgb(23 25 29 / 70%);
+  transition: opacity 150ms;
 }
-.player-fullscreen .video-surface {
+.player-controls-hidden .view-player > .header {
+  opacity: 0;
+  pointer-events: none;
+}
+.player-fullscreen .view-player > .header { display: none; }
+html:not(.player-fullscreen) .player-toolbar { display: none; }
+.video-surface {
   position: absolute;
   inset: 0;
 }
-.player-fullscreen .player-toolbar,
-.player-fullscreen .player-bottom {
+.player-toolbar,
+.player-page .player-bottom {
   position: absolute;
   left: 0;
   right: 0;
@@ -1105,25 +1117,27 @@ html.native-playback,
   top: 0;
   height: 64px;
 }
+.player-page .player-bottom { bottom: 0; }
 .player-fullscreen .player-bottom {
   bottom: 0;
   padding-top: 30px;
 }
-.player-fullscreen .controls-hidden .player-toolbar,
-.player-fullscreen .controls-hidden .player-bottom {
+.controls-hidden .player-toolbar,
+.controls-hidden .player-bottom {
   opacity: 0;
   pointer-events: none;
 }
-.player-fullscreen .controls-hidden,
-.player-fullscreen .controls-hidden .video-surface {
+.controls-hidden,
+.controls-hidden .video-surface {
   cursor: none;
 }
 .player-fullscreen .player-filename {
   flex: 1;
 }
 @media (prefers-reduced-motion: reduce) {
-  .player-fullscreen .player-toolbar,
-  .player-fullscreen .player-bottom {
+  .view-player > .header,
+  .player-toolbar,
+  .player-page .player-bottom {
     transition: none;
   }
 }
@@ -1207,9 +1221,12 @@ html.native-playback,
 .player-spacer {
   flex: 1;
 }
-.player-controls select {
-  max-width: 145px;
+.player-download {
+  margin-right: 8px;
+  color: #a7b0bd;
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .player-message {
   display: flex;
@@ -1225,8 +1242,7 @@ html.native-playback,
 .player-message.has-error {
   color: #ffb3aa;
 }
-/* One rail: downloaded byte ranges underneath a thinner elapsed-time fill.
-   Keep the edges visible so seeking past a missing piece never conceals it. */
+/* Downloaded ranges form one rail; the thumb marks playback position. */
 .timeline-track {
   position: absolute;
   inset: 8px;
@@ -1242,13 +1258,6 @@ html.native-playback,
   height: 100%;
 }
 .download-progress path { fill: #3d8490; }
-.timeline-played {
-  position: absolute;
-  top: 2.5px;
-  height: 3px;
-  background: #71d5e6;
-  border-radius: inherit;
-}
 input[type="range"] {
   accent-color: #71d5e6;
   height: 14px;
@@ -1312,9 +1321,6 @@ input[type="range"] {
   .player-controls {
     flex-wrap: wrap;
   }
-  .player-controls select {
-    max-width: 120px;
-  }
   .preferences-page {
     padding: 20px;
   }
@@ -1353,6 +1359,18 @@ input[type="range"] {
 .completion-toast button .icon { font-size: 18px; }
 .player-fullscreen .completion-toast { top: 16px; }
 .audio-track-control { position: relative; flex-shrink: 0; }
+.playback-speed-control .audio-track-trigger {
+  width: 64px;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 8px;
+  font-variant-numeric: tabular-nums;
+}
+.playback-speed-control .audio-track-menu {
+  left: 0;
+  right: auto;
+  width: 190px;
+}
 .audio-track-trigger {
   display: flex;
   align-items: center;

@@ -54,7 +54,6 @@ export function PlaybackTimeline({ id, index, time, duration, onSeek }: {
         <svg className="download-progress" viewBox="0 0 1 1" preserveAspectRatio="none">
           <path d={path} />
         </svg>
-        <div className="timeline-played" style={{ width: `${length ? position / length * 100 : 0}%` }} />
       </div>
       <input
         type="range"
