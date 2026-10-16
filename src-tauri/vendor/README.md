@@ -16,6 +16,9 @@ TorrentCat modifications:
 - Bound HTTP response bodies, local metadata reads, tracker peer lists and IDs,
   bencode depth/value/byte budgets and numeric conversion. Reject unrepresentable
   announce deadlines without terminating the monitor.
+- Verify every disk piece on restart and explicit paused rechecks. Persist optional
+  filesystem checkpoints only after payload sync, using atomic replacement and
+  directory sync; never flush unsynced bitmaps on drop.
 - Track actual payload bytes across pauses, independently of verified disk data.
 - Calculate tracker `left` across all files, including deselected files.
 - Send HTTP/UDP lifecycle events and await bounded stopped requests on pause,
@@ -33,8 +36,10 @@ Changes include the component `Cargo.toml` files, `librqbit/src/session.rs`,
 `librqbit/src/storage/filesystem/fs.rs`, and
 `librqbit-tracker-comms/src/{tracker_comms.rs,tracker_comms_http.rs,tracker_comms_udp.rs}`.
 Bencode changes are in `librqbit-bencode/src/{deserialize.rs,lib.rs}`; the bounded
-HTTP reader is `librqbit-tracker-comms/src/http_body.rs`. Other vendored sources
-retain their upstream implementation.
+HTTP reader is `librqbit-tracker-comms/src/http_body.rs`. Checkpoint/recheck changes also touch `bitv.rs`, `bitv_factory.rs`,
+`session_persistence/{json.rs,postgres.rs}`, `storage/mod.rs`,
+`storage/filesystem/opened_file.rs` and `torrent_state/initializing.rs`.
+Other vendored sources retain their upstream implementation.
 
 Regression tests live in `../src/tracker_tests.rs` and
 `../tests/storage_confinement.rs` and use only temporary data,
@@ -43,8 +48,9 @@ loopback HTTP/UDP trackers and loopback peers:
 ```sh
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 cargo test --manifest-path src-tauri/Cargo.toml --locked -p librqbit-bencode -p librqbit-tracker-comms --lib
+cargo test --manifest-path src-tauri/Cargo.toml --locked -p librqbit --lib --no-default-features --features rust-tls -- --skip tests::e2e
 ```
 
 When upgrading rqbit, port these changes and run the local tracker tests before
-removing or replacing either patch. Local correctness does not imply approval
+removing or replacing a patch. Local correctness does not imply approval
 by any private tracker.

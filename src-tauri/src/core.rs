@@ -79,7 +79,7 @@ impl Core {
             persistence: Some(SessionPersistenceConfig::Json {
                 folder: Some(directory.join("engine")),
             }),
-            fastresume: true,
+            fastresume: false,
             listen: Some(ListenerOptions {
                 listen_addr: if offline {
                     "127.0.0.1:0".parse()?
@@ -296,7 +296,7 @@ impl Core {
             *profile = next;
         }
         drop(profile);
-        if matches!(action, "remove" | "delete" | "pause") {
+        if matches!(action, "remove" | "delete" | "pause" | "recheck") {
             self.media.revoke_torrent(id).await;
         }
         match action {
@@ -307,6 +307,10 @@ impl Core {
                 ) {
                     self.api.api_torrent_action_pause(key).await?;
                 }
+            }
+            "recheck" => {
+                let handle = self.api.session().get(key).context("Unknown torrent")?;
+                self.api.session().recheck(&handle).await?;
             }
             "resume" => {
                 if !matches!(

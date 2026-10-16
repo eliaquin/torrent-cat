@@ -2,8 +2,9 @@ use crate::{api::TorrentIdOrHash, bitv::BitV, type_aliases::BF};
 
 #[async_trait::async_trait]
 pub trait BitVFactory: Send + Sync {
-    async fn load(&self, id: TorrentIdOrHash) -> anyhow::Result<Option<Box<dyn BitV>>>;
-    async fn clear(&self, id: TorrentIdOrHash) -> anyhow::Result<()>;
+    fn requires_durable_storage(&self) -> bool {
+        true
+    }
     async fn store_initial_check(
         &self,
         id: TorrentIdOrHash,
@@ -15,14 +16,9 @@ pub struct NonPersistentBitVFactory {}
 
 #[async_trait::async_trait]
 impl BitVFactory for NonPersistentBitVFactory {
-    async fn load(&self, _: TorrentIdOrHash) -> anyhow::Result<Option<Box<dyn BitV>>> {
-        Ok(None)
+    fn requires_durable_storage(&self) -> bool {
+        false
     }
-
-    async fn clear(&self, _id: TorrentIdOrHash) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     async fn store_initial_check(
         &self,
         _id: TorrentIdOrHash,

@@ -198,6 +198,9 @@ struct PgBitfield {
 }
 
 impl BitV for PgBitfield {
+    fn is_persistent(&self) -> bool {
+        true
+    }
     fn as_slice(&self) -> &bitvec::prelude::BitSlice<u8, bitvec::prelude::Msb0> {
         self.inmem.as_bitslice()
     }
@@ -264,47 +267,6 @@ impl BitV for PgBitfield {
 
 #[async_trait::async_trait]
 impl BitVFactory for PostgresSessionStorage {
-    async fn load(&self, id: TorrentIdOrHash) -> anyhow::Result<Option<Box<dyn BitV>>> {
-        #[derive(sqlx::FromRow)]
-        struct HaveBitfield {
-            have_bitfield: Option<Vec<u8>>,
-        }
-
-        macro_rules! exec {
-            ($q:expr, $v:expr) => {
-                sqlx::query_as($q)
-                    .bind($v)
-                    .fetch_one(&self.pool)
-                    .await
-                    .context($q)
-                    .context("error executing query")?
-            };
-        }
-
-        let hb: HaveBitfield = match id {
-            TorrentIdOrHash::Id(id) => {
-                let id: i32 = id.try_into()?;
-                exec!("SELECT have_bitfield FROM torrents WHERE id = $1", id)
-            }
-            TorrentIdOrHash::Hash(h) => {
-                exec!(
-                    "SELECT have_bitfield FROM torrents WHERE info_hash = $1",
-                    &h.0[..]
-                )
-            }
-        };
-
-        let hb = hb.have_bitfield;
-        Ok(hb.map(|b| {
-            PgBitfield {
-                torrent_id: id,
-                inmem: BF::from_boxed_slice(b.into_boxed_slice()),
-                pool: self.pool.clone(),
-            }
-            .into_dyn()
-        }))
-    }
-
     async fn store_initial_check(
         &self,
         id: TorrentIdOrHash,
@@ -317,32 +279,5 @@ impl BitVFactory for PostgresSessionStorage {
         };
         bf.flush(false)?;
         Ok(bf.into_dyn())
-    }
-
-    async fn clear(&self, id: TorrentIdOrHash) -> anyhow::Result<()> {
-        macro_rules! exec {
-            ($q:expr, $v:expr) => {
-                sqlx::query($q)
-                    .bind($v)
-                    .execute(&self.pool)
-                    .await
-                    .context($q)
-                    .context("error executing query")?
-            };
-        }
-
-        match id {
-            TorrentIdOrHash::Id(id) => {
-                let id: i32 = id.try_into()?;
-                exec!("UPDATE torrents SET have_bitfield = NULL WHERE id = $1", id);
-            }
-            TorrentIdOrHash::Hash(h) => {
-                exec!(
-                    "UPDATE torrents SET have_bitfield = NULL WHERE info_hash = $1",
-                    &h.0[..]
-                );
-            }
-        }
-        Ok(())
     }
 }

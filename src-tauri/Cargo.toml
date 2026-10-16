@@ -59,3 +59,8 @@ strip = false
 librqbit = { path = "vendor/librqbit" }
 librqbit-tracker-comms = { path = "vendor/librqbit-tracker-comms" }
 librqbit-bencode = { path = "vendor/librqbit-bencode" }
+
+[workspace]
+members = ["vendor/librqbit", "vendor/librqbit-tracker-comms", "vendor/librqbit-bencode"]
+default-members = ["."]
+resolver = "3"

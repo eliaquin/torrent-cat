@@ -129,7 +129,7 @@ where
             where
                 E: serde::de::Error,
             {
-                if v.len() % AddrType::fixed_len() != 0
+                if !v.len().is_multiple_of(AddrType::fixed_len())
                     || v.len() / AddrType::fixed_len() > MAX_PEERS
                 {
                     return Err(E::custom("invalid or excessive compact peers"));

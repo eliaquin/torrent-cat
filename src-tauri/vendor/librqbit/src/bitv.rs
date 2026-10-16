@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use bitvec::{boxed::BitBox, order::Msb0, slice::BitSlice, vec::BitVec};
-use tracing::debug_span;
-
-use crate::{spawn_utils::BlockingSpawner, storage::filesystem::OurFileExt};
+use bitvec::{boxed::BitBox, order::Msb0, slice::BitSlice};
 
 pub trait BitV: Send + Sync {
+    fn is_persistent(&self) -> bool {
+        false
+    }
     fn as_slice(&self) -> &BitSlice<u8, Msb0>;
     fn as_slice_mut(&mut self) -> &mut BitSlice<u8, Msb0>;
     fn into_dyn(self) -> Box<dyn BitV>;
@@ -16,89 +16,31 @@ pub trait BitV: Send + Sync {
 
 pub type BoxBitV = Box<dyn BitV>;
 
-struct DiskFlushRequest {
-    snapshot: BitBox<u8, Msb0>,
-}
-
 pub struct DiskBackedBitV {
     bv: BitBox<u8, Msb0>,
-    flush_tx: tokio::sync::mpsc::UnboundedSender<DiskFlushRequest>,
+    filename: PathBuf,
 }
 
-impl Drop for DiskBackedBitV {
-    fn drop(&mut self) {
-        if self
-            .flush_tx
-            .send(DiskFlushRequest {
-                snapshot: self.bv.clone(),
-            })
-            .is_err()
-        {
-            tracing::warn!("error flushing bitv on drop: flusher task is dead")
-        }
-    }
+/// A complete atomic checkpoint, published only after the caller's payload
+/// barrier. No drop-time flush: dropping must not persist an unsynced bitmap.
+pub(crate) fn persist_snapshot(filename: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    let parent = filename.parent().context("checkpoint has no parent")?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(filename)?;
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
-// NOTE on mmap. rqbit used it for a while, but it has issues on slow disks.
-// We want writes to bitv to be instant in RAM. However when disk is slow, occasionally
-// the writes stall which blocks the executor.
-// Thus this separate "thread" of flushing was implemented.
 impl DiskBackedBitV {
-    pub async fn new(filename: PathBuf, spawner: BlockingSpawner) -> anyhow::Result<Self> {
-        let buf = tokio::fs::read(&filename)
-            .await
-            .with_context(|| format!("error reading {filename:?}"))?;
-        let bv = BitVec::from_vec(buf).into_boxed_bitslice();
-
-        // blocking file to avoid double-buffering and double-memcpy
-        let file = spawner
-            .block_in_place_with_semaphore(|| {
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(false)
-                    .open(&filename)
-            })
-            .await
-            .with_context(|| format!("error opening {filename:?}"))?;
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DiskFlushRequest>();
-        librqbit_core::spawn_utils::spawn(
-            debug_span!("diskbitv-flusher", ?filename),
-            format!("DiskBackedBitV::flusher {filename:?}"),
-            async move {
-                loop {
-                    let Some(mut req) = rx.recv().await else {
-                        break;
-                    };
-                    while let Ok(r) = rx.try_recv() {
-                        req = r;
-                    }
-
-                    if let Err(e) = spawner
-                        .block_in_place_with_semaphore(|| {
-                            file.pwrite_all(0, req.snapshot.as_raw_slice())
-                        })
-                        .await
-                    {
-                        tracing::error!(?filename, "error writing to bitv: {e:#}");
-                        if let Err(e) = tokio::fs::remove_file(&filename).await {
-                            tracing::error!(?filename, "error removing bitv: {e:#}");
-                        }
-                        break;
-                    }
-
-                    if let Err(e) = spawner
-                        .block_in_place_with_semaphore(|| file.sync_all())
-                        .await
-                    {
-                        tracing::error!(?filename, "error fsyncing bitv: {e:#}");
-                    }
-                }
-
-                Ok::<_, anyhow::Error>(())
-            },
-        );
-        Ok(Self { bv, flush_tx: tx })
+    pub fn new(filename: PathBuf, verified: BitBox<u8, Msb0>) -> Self {
+        Self {
+            bv: verified,
+            filename,
+        }
     }
 }
 
@@ -126,6 +68,9 @@ impl BitV for BitBox<u8, Msb0> {
 }
 
 impl BitV for DiskBackedBitV {
+    fn is_persistent(&self) -> bool {
+        true
+    }
     fn as_slice(&self) -> &BitSlice<u8, Msb0> {
         self.bv.as_bitslice()
     }
@@ -139,10 +84,7 @@ impl BitV for DiskBackedBitV {
     }
 
     fn flush(&mut self, _flush_async: bool) -> anyhow::Result<()> {
-        let req = DiskFlushRequest {
-            snapshot: self.bv.clone(),
-        };
-        self.flush_tx.send(req).context("flusher task is dead")
+        persist_snapshot(&self.filename, self.bv.as_raw_slice())
     }
 
     fn into_dyn(self) -> Box<dyn BitV> {
@@ -151,6 +93,9 @@ impl BitV for DiskBackedBitV {
 }
 
 impl BitV for Box<dyn BitV> {
+    fn is_persistent(&self) -> bool {
+        (**self).is_persistent()
+    }
     fn as_slice(&self) -> &BitSlice<u8, Msb0> {
         (**self).as_slice()
     }
@@ -169,5 +114,30 @@ impl BitV for Box<dyn BitV> {
 
     fn into_dyn(self) -> Box<dyn BitV> {
         self
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    #[test]
+    fn checkpoints_replace_atomically_and_drop_does_not_publish_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pieces.bitv");
+        persist_snapshot(&path, &[0; 128]).unwrap();
+        let mut bits =
+            DiskBackedBitV::new(path.clone(), BitBox::from_boxed_slice(vec![0u8].into()));
+        bits.as_slice_mut().set(0, true);
+        bits.flush(false).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), [128]);
+        bits.as_slice_mut().set(1, true);
+        drop(bits);
+        assert_eq!(std::fs::read(&path).unwrap(), [128]);
+        // A failed publish cleans its temporary and leaves other checkpoints intact.
+        let invalid = dir.path().join("directory");
+        std::fs::create_dir(&invalid).unwrap();
+        assert!(persist_snapshot(&invalid, &[255]).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), [128]);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 }

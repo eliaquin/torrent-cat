@@ -506,6 +506,23 @@ function App() {
                                 Save torrent file…
                               </button>
                               <button
+                                disabled={st !== "paused"}
+                                title={
+                                  st === "paused"
+                                    ? "Verify every piece on disk; keep paused"
+                                    : "Pause the transfer before verifying files"
+                                }
+                                onClick={() => {
+                                  setMore(null);
+                                  void invoke("torrent_action", {
+                                    id: t.id,
+                                    action: "recheck",
+                                  }).catch(report);
+                                }}
+                              >
+                                Verify files
+                              </button>
+                              <button
                                 className="danger"
                                 onClick={() => {
                                   setMore(null);

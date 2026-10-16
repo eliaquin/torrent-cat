@@ -131,12 +131,14 @@ impl DerefMut for OpenedFileLocked {
 
 #[derive(Debug)]
 pub(crate) struct OpenedFile {
+    dummy: bool,
     file: RwLock<OpenedFileLocked>,
 }
 
 impl OpenedFile {
     pub fn new(path: PathBuf, f: File) -> Self {
         Self {
+            dummy: false,
             file: RwLock::new(OpenedFileLocked {
                 path,
                 fd: Some(f),
@@ -148,13 +150,19 @@ impl OpenedFile {
 
     pub fn new_dummy() -> Self {
         Self {
+            dummy: true,
             file: RwLock::new(Default::default()),
         }
+    }
+
+    pub fn is_dummy(&self) -> bool {
+        self.dummy
     }
 
     pub fn take_clone(&self) -> anyhow::Result<Self> {
         let f = std::mem::take(&mut *self.file.write());
         Ok(Self {
+            dummy: self.dummy,
             file: RwLock::new(f),
         })
     }
