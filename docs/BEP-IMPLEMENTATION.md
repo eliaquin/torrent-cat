@@ -20,7 +20,7 @@ Las referencias de líneas de la auditoría describen el commit base, no el cód
 | F12 — pausa y borrado durante inicialización | Integrado en `beef272` y publicado | Barrera de permisos, cancelación y stream de peers |
 | F13 — límites al servir metadata | Integrado en `29932f9` y publicado | Índices extremos, bloques alineados y peer TCP |
 | F14 — secuencia al recibir metadata | Integrado en `396c54c` y publicado | Negociación incremental y peers adverso/válido |
-| F15 — buffers para mapas de piezas | Implementado, revisado y validado | TCP grande, fragmentación y límites antes de reservar |
+| F15 — buffers para mapas de piezas | Integrado en `d0a2899` y publicado | TCP grande, fragmentación y límites antes de reservar |
 
 ## F1: confinamiento de almacenamiento
 
@@ -170,3 +170,26 @@ La escritura reserva el bitfield según el número validado de piezas y libera e
 Self-review: el control de tamaño ocurre después de cada lectura, evitando que una cabecera fragmentada ordene leer todo su tamaño antes de validarla. El crecimiento conserva las dos partes del ring; los diagnósticos usan usize para no truncar los tamaños nuevos. La trama que sigue a un bitfield se conserva. No se aumentó indiscriminadamente el buffer fijo de bloques.
 
 Validación: 48 pruebas del motor pasan (3 ignoradas, 5 E2E excluidas); suite de aplicación/integración y Clippy con `-D warnings` pasan. Un peer TCP intercambia bitfields de 16.495/16.500/32.763/32.768/32.769 bytes; descarga la pieza que falta, verifica SHA-1/contenido y recibe una subida por la misma conexión. Son fixtures de piezas pequeñas para acotar disco, sin fingir solo la serialización. Otra prueba entrega la trama byte por byte con la cabecera cruzando el final del ring, seguida de Unchoke. Tamaños extremos/control/bloque/extensión, diferencia con metainfo y máximo absoluto se rechazan antes de crecer. Referencia: [BEP 3](https://www.bittorrent.org/beps/bep_0003.html).
+
+
+## Verificación conjunta y límites
+
+Sobre `d0a2899`: 58 pruebas de aplicación/integración, 48 del motor, 21 de bencode, 24 del protocolo y 19 de tracker pasan: **170 en total**. Hay 5 pruebas ignoradas y 5 E2E del motor excluidas; no se presentan como ejecutadas. La compilación TypeScript/Vite, Clippy del motor/protocolo con `-D warnings` y la compilación opcional PostgreSQL pasan. El PostgreSQL real, Miri, la pérdida física de energía y la interfaz nativa manual no se validaron. Las pruebas nuevas usan directorios temporales y loopback, sin TD ni cuentas privadas.
+
+Las correcciones F1–F15 cierran hallazgos concretos, no constituyen una certificación completa de los BEP. El siguiente trabajo de calidad, en orden, es:
+
+1. Ejecutar estas suites en CI macOS, incluyendo explícitamente crates vendorizados; añadir análisis de dependencias RustSec/npm y conservar resultados por commit.
+2. Mantener corpus y fuzzing de parsers/negociación; probar fallos de disco, red y cancelación de manera continua.
+3. Validar un swarm local con Transmission y libtorrent/qBittorrent, sesiones prolongadas IPv4/IPv6, sueño/reactivación y streaming con selección parcial.
+4. Hacer visibles diagnósticos de tracker sin credenciales, documentar presupuestos de recursos y automatizar firma/notarización para distribución.
+
+Las capacidades opcionales —v2/híbridos, web seeds o cambios en descubrimiento de magnets— requieren decisiones propias y no se declaran implementadas aquí.
+
+
+## Revisión independiente de Claude CLI
+
+Claude CLI revisó el código en modo de solo lectura sobre `d0a2899` (53 turnos, sin ejecutar pruebas). No señaló defectos en F13–F15; propuso seis casos adicionales. Sus afirmaciones se contrastan con código y regresiones antes de adoptarlas.
+
+### C4: reanudar tras timeout de pausa — confirmado y corregido
+
+Una pausa puede agotar 10 s mientras trabajo síncrono conserva la inicialización. Reanudar ahora espera la salida de esa generación cancelada antes de publicar intención activa o crear descubrimiento. Si sigue detenida, devuelve error y conserva la pausa; no informa una reanudación que terminará sin worker. Self-review: se comprueba de nuevo el cierre de sesión después de esperar. La regresión usa reloj simulado y conserva explícitamente guard/registro de tarea más allá del plazo; resume permanece pendiente hasta liberarlos y entonces llega a Live. Pasa junto con Clippy y la suite del motor.
