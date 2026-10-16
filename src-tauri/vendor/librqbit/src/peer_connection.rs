@@ -37,6 +37,9 @@ pub trait PeerConnectionHandler {
     fn on_connected(&self, _connection_time: Duration) {}
     fn should_send_bitfield(&self) -> bool;
     fn serialize_bitfield_message_to_buf(&self, buf: &mut [u8]) -> anyhow::Result<usize>;
+    fn bitfield_bytes(&self) -> Option<usize> {
+        None
+    }
     fn on_handshake(&self, handshake: Handshake, ckind: ConnectionKind) -> anyhow::Result<()>;
     fn on_extended_handshake(
         &self,
@@ -305,6 +308,7 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
         } = args;
 
         use tokio::io::AsyncWriteExt;
+        read_buf.set_bitfield_bytes(self.handler.bitfield_bytes())?;
 
         let rwtimeout = self
             .options
@@ -347,14 +351,19 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
                 .unwrap_or_else(|| Duration::from_secs(120));
 
             if self.handler.should_send_bitfield() {
+                let bytes = self
+                    .handler
+                    .bitfield_bytes()
+                    .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("missing bitfield size")))?;
+                let mut bitfield = vec![0; bytes + 5];
                 let len = self
                     .handler
-                    .serialize_bitfield_message_to_buf(&mut *write_buf)
+                    .serialize_bitfield_message_to_buf(&mut bitfield)
                     .map_err(Error::Anyhow)?;
                 with_timeout(
                     "writing bitfield",
                     rwtimeout,
-                    write.write_all(&write_buf[..len]).map_err(Error::Write),
+                    write.write_all(&bitfield[..len]).map_err(Error::Write),
                 )
                 .await?;
                 trace!("sent bitfield");

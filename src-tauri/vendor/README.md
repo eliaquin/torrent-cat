@@ -27,6 +27,12 @@ TorrentCat modifications:
   retry and restart, and atomically sync JSON/metainfo plus unlink directories.
   Serialize operations per torrent, deduplicate concurrent magnet resolution and
   preserve monotonic persisted IDs. Join owned tasks and bound total final announces.
+- Cancel initialization waits/checks on pause and deletion, retaining the latest
+  discovery intent and releasing ownership on task cancellation.
+- Reject out-of-range metadata requests, validate incremental metadata negotiation
+  and keep malformed peers from aborting resolution through other peers.
+- Size bitfield buffers from validated piece counts, with separate bounded control,
+  block and extension frames and header validation before buffer growth.
 - Count upload payload at each successful transport write, including interrupted
   frames and explicit retransfers, excluding protocol headers/control messages.
   Preserve session totals across pauses, independently of verified disk data.
@@ -58,7 +64,7 @@ HTTP reader is `librqbit-tracker-comms/src/http_body.rs`. Checkpoint/recheck cha
 `session_persistence/{json.rs,postgres.rs}`, `storage/mod.rs`,
 `storage/filesystem/opened_file.rs` and `torrent_state/initializing.rs`.
 Upload changes also touch `upload_queue.rs`, `peer_connection.rs`, `limits.rs` and
-`torrent_state/live/peer/mod.rs`.
+`torrent_state/live/peer/mod.rs`, `read_buf.rs` and `error.rs`.
 Extension parser/serializer changes are in `librqbit-peer-protocol/src/extended/`.
 That crate omits the upstream benchmark target and Criterion dev dependency.
 Other vendored sources retain their upstream implementation.
