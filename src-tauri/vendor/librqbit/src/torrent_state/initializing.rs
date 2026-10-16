@@ -59,6 +59,7 @@ impl TorrentStateInitializing {
         only_files: Option<Vec<usize>>,
         files: FileStorage,
     ) -> Self {
+        shared.files_initialized.store(true, Ordering::Release);
         Self {
             shared,
             metadata,

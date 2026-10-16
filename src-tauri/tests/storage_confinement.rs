@@ -260,3 +260,43 @@ async fn concurrent_directory_link_swaps_cannot_modify_external_data() {
     );
     s.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_multifile_strict_creation_rolls_back_only_new_empty_files() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("a.bin"), vec![1; 16384]).unwrap();
+    std::fs::write(source.join("b.bin"), vec![2; 16384]).unwrap();
+    let mut bytes = Vec::new();
+    lava_torrent::torrent::v1::TorrentBuilder::new(&source, 16384)
+        .set_num_threads(1)
+        .build()
+        .unwrap()
+        .write_into(&mut bytes)
+        .unwrap();
+    let download = root.path().join("download");
+    let output = download.join("source");
+    std::fs::create_dir_all(&output).unwrap();
+    std::fs::write(output.join("b.bin"), b"preserve-existing").unwrap();
+    let s = session(&download, Some(&root.path().join("profile"))).await;
+    assert!(add(&s, &bytes, false).await.is_err());
+    assert!(
+        !output.join("a.bin").exists(),
+        "created before collision and must be rolled back"
+    );
+    assert_eq!(
+        std::fs::read(output.join("b.bin")).unwrap(),
+        b"preserve-existing"
+    );
+    std::fs::rename(output.join("b.bin"), output.join("b.saved")).unwrap();
+    let h = add(&s, &bytes, false).await.unwrap();
+    assert!(h.is_paused());
+    assert!(output.join("a.bin").exists());
+    assert!(output.join("b.bin").exists());
+    assert_eq!(
+        std::fs::read(output.join("b.saved")).unwrap(),
+        b"preserve-existing"
+    );
+    s.stop().await;
+}

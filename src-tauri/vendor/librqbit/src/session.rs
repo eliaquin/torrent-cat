@@ -926,7 +926,13 @@ impl Session {
                                         match restore {
                                             Ok(()) => Ok::<_, anyhow::Error>(()),
                                             Err(error) => {
-                                                if session.get(id.into()).is_none() {
+                                                if let Some(handle) = session.get(id.into()) {
+                                                    if let Some(delete_files) = st.pending_delete {
+                                                        handle.shared.deleting.store(true, Ordering::Release);
+                                                        handle.shared.delete_files.store(delete_files, Ordering::Release);
+                                                        handle.pause()?;
+                                                    }
+                                                } else {
                                                     session.register_recovery(id, &st, error)?;
                                                 }
                                                 Ok(())
@@ -1484,8 +1490,6 @@ impl Session {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         };
 
-        let _permit = self.spawner.semaphore().acquire_owned().await?;
-
         let (managed_torrent, metadata, _operation) = {
             let mut g = self.db.write();
             if let Some((id, handle)) = g.torrents.iter().find_map(|(eid, t)| {
@@ -1514,6 +1518,7 @@ impl Session {
                 lifecycle: Arc::new(tokio::sync::Mutex::new(())),
                 deleting: std::sync::atomic::AtomicBool::new(false),
                 delete_files: std::sync::atomic::AtomicBool::new(false),
+                files_initialized: std::sync::atomic::AtomicBool::new(false),
                 spawner: self.spawner.clone(),
                 peer_id: self.peer_id,
                 storage_factory,
@@ -1535,17 +1540,11 @@ impl Session {
                 client_name_and_version: self.client_name_and_version.clone(),
             });
 
-            let initializing = Arc::new(TorrentStateInitializing::new(
-                minfo.clone(),
-                metadata.clone(),
-                only_files.clone(),
-                self.spawner
-                    .block_in_place(|| minfo.storage_factory.create_and_init(&minfo, &metadata))?,
-            ));
             let handle = Arc::new(ManagedTorrent {
                 locked: RwLock::new(ManagedTorrentLocked {
-                    paused: opts.paused,
-                    state: ManagedTorrentState::Initializing(initializing),
+                    // Provisioning is durable and inert before creating payload files.
+                    paused: true,
+                    state: ManagedTorrentState::Error(anyhow::anyhow!("Preparing torrent storage")),
                     only_files,
                 }),
                 state_change_notify: Notify::new(),
@@ -1565,12 +1564,63 @@ impl Session {
             (handle, metadata, operation)
         };
 
-        drop(_permit);
         if let Some(p) = self.persistence.as_ref()
             && let Err(e) = p.store(id, &managed_torrent).await
         {
             self.db.write().torrents.remove(&id);
             return Err(e);
+        }
+
+        let files = self
+            .spawner
+            .block_in_place_with_semaphore(|| {
+                managed_torrent
+                    .shared
+                    .storage_factory
+                    .create_and_init(managed_torrent.shared(), &metadata)
+            })
+            .await;
+        let files = match files {
+            Ok(files) => files,
+            Err(error) => {
+                managed_torrent.locked.write().state =
+                    ManagedTorrentState::Error(anyhow::anyhow!("{error:#}"));
+                managed_torrent.state_change_notify.notify_waiters();
+                // A fresh failed add should remain retryable with new options.
+                // Restored records (or failed durable rollback) stay visible and
+                // paused, retaining their original file-reuse permission.
+                if opts.preferred_id.is_none() {
+                    let forgotten = if let Some(p) = &self.persistence {
+                        p.delete(id).await.is_ok()
+                    } else {
+                        true
+                    };
+                    if forgotten {
+                        self.db.write().torrents.remove(&id);
+                    }
+                }
+                return Err(error);
+            }
+        };
+        {
+            let mut state = managed_torrent.locked.write();
+            state.state =
+                ManagedTorrentState::Initializing(Arc::new(TorrentStateInitializing::new(
+                    managed_torrent.shared.clone(),
+                    metadata.clone(),
+                    state.only_files.clone(),
+                    files,
+                )));
+            state.paused = opts.paused;
+        }
+        if let Err(error) = self.try_update_persistence_metadata(&managed_torrent).await {
+            managed_torrent.pause()?;
+            // A publication may have succeeded before directory-sync failed.
+            // Compensate with paused intent, retaining the managed entry/files.
+            if let Err(rollback) = self.try_update_persistence_metadata(&managed_torrent).await {
+                warn!(%rollback, "could not confirm paused provisioning state");
+            }
+            return Err(error);
         }
 
         let _e = managed_torrent.shared.span.clone().entered();
@@ -1617,6 +1667,7 @@ impl Session {
             transfer_tasks: TaskTracker::new(),
             lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             deleting: std::sync::atomic::AtomicBool::new(record.pending_delete.is_some()),
+            files_initialized: std::sync::atomic::AtomicBool::new(false),
             delete_files: std::sync::atomic::AtomicBool::new(
                 record.pending_delete.unwrap_or(false),
             ),
@@ -1624,7 +1675,7 @@ impl Session {
             span: debug_span!(parent:self.rs(), "torrent", id),
             options: ManagedTorrentOptions {
                 output_folder: record.output_folder.clone(),
-                allow_overwrite: true,
+                allow_overwrite: record.allow_overwrite,
                 peer_connect_timeout: self.peer_opts.connect_timeout,
                 peer_read_write_timeout: self.peer_opts.read_write_timeout,
                 peer_limit: self.peer_limit,
@@ -1783,6 +1834,10 @@ impl Session {
         }
         handle.pause()?;
         let delete_files = delete_files || handle.shared.delete_files.load(Ordering::Acquire);
+        anyhow::ensure!(
+            !delete_files || handle.shared.can_reuse_files(),
+            "File ownership was not established. Remove this entry without deleting data."
+        );
         // Once removal is requested, keep the in-memory handle inert even if
         // persistence reports an uncertain commit (rename succeeded, fsync failed).
         handle
@@ -2023,7 +2078,10 @@ impl Session {
         }
         self.wait_for_tracker_stop(handle.info_hash()).await?;
         let peer_rx = self.make_peer_rx_managed_torrent(handle, true);
-        handle.start(peer_rx, false)?;
+        if let Err(error) = handle.start(peer_rx, false) {
+            let _ = handle.pause();
+            return Err(error);
+        }
         if let Err(error) = self.try_update_persistence_metadata(handle).await {
             handle.pause()?;
             let _ = self.quiesce(handle).await;
@@ -2386,6 +2444,21 @@ mod tests {
             timeout(Duration::from_secs(2), s.stop()).await.unwrap();
             assert!(h.live().is_none());
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn strict_add_can_reopen_its_own_files_after_runtime_error() {
+        let (_root, s) = initialization_fixture().await;
+        let h = waiting_torrent(&s).await;
+        h.wait_until_initialized().await.unwrap();
+        assert!(!h.shared.options.allow_overwrite);
+        assert!(h.shared.can_reuse_files());
+        h.locked.write().state =
+            crate::ManagedTorrentState::Error(anyhow::anyhow!("injected runtime failure"));
+        s.unpause(&h).await.unwrap();
+        h.wait_until_initialized().await.unwrap();
+        assert!(h.live().is_some());
+        s.stop().await;
     }
 
     #[tokio::test(start_paused = true)]

@@ -70,6 +70,31 @@ fn open_root(path: &Path) -> anyhow::Result<Dir> {
     }
 }
 
+// On strict multi-file creation failure, remove only empty files created by
+// this attempt. The capability and identity check exclude pre-existing files.
+#[cfg(unix)]
+struct CreatedFiles<'a> {
+    root: &'a Dir,
+    entries: Vec<(PathBuf, u64, u64)>,
+}
+#[cfg(unix)]
+impl Drop for CreatedFiles<'_> {
+    fn drop(&mut self) {
+        use cap_std::fs::MetadataExt;
+        for (path, dev, ino) in self.entries.iter().rev() {
+            if let Ok(meta) = self.root.symlink_metadata(path)
+                && meta.is_file()
+                && meta.len() == 0
+                && meta.dev() == *dev
+                && meta.ino() == *ino
+                && let Err(error) = self.root.remove_file(path)
+            {
+                tracing::warn!(%error, "could not roll back newly created empty file");
+            }
+        }
+    }
+}
+
 impl FilesystemStorage {
     fn remove_entry(&self, path: &Path, directory: bool) -> anyhow::Result<()> {
         let parent = path
@@ -187,7 +212,7 @@ impl TorrentStorage for FilesystemStorage {
         shared: &ManagedTorrentShared,
         metadata: &TorrentMetadata,
     ) -> anyhow::Result<()> {
-        self.init_files(metadata, shared.options.allow_overwrite)
+        self.init_files(metadata, shared.can_reuse_files())
     }
 
     fn refresh(
@@ -206,6 +231,11 @@ impl FilesystemStorage {
         allow_overwrite: bool,
     ) -> anyhow::Result<()> {
         let mut files = Vec::<OpenedFile>::new();
+        #[cfg(unix)]
+        let mut created = CreatedFiles {
+            root: &self.root,
+            entries: Vec::new(),
+        };
         for file_details in metadata.file_infos.iter() {
             let mut full_path = self.output_folder.clone();
             let relative_path = &file_details.relative_filename;
@@ -232,14 +262,21 @@ impl FilesystemStorage {
                 .with_context(|| {
                     format!("error opening confined torrent file {relative_path:?}")
                 })?;
-            anyhow::ensure!(
-                f.metadata()?.is_file(),
-                "torrent path is not a regular file"
-            );
+            let metadata = f.metadata()?;
+            anyhow::ensure!(metadata.is_file(), "torrent path is not a regular file");
+            #[cfg(unix)]
+            if !allow_overwrite {
+                use cap_std::fs::MetadataExt;
+                created
+                    .entries
+                    .push((relative_path.clone(), metadata.dev(), metadata.ino()));
+            }
             files.push(OpenedFile::new(full_path, f.into_std()));
         }
 
         self.opened_files = files;
+        #[cfg(unix)]
+        created.entries.clear();
         Ok(())
     }
 }
