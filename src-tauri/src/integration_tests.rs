@@ -4,6 +4,72 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn piece_map_reports_verified_islands_while_paused_and_live() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let downloads = root.path().join("downloads");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&downloads).unwrap();
+    let piece = 16_384;
+    let payload: Vec<u8> = (0..piece * 5 + 123).map(|i| (i % 251) as u8).collect();
+    let path = source.join("movie.mp4");
+    std::fs::write(&path, &payload).unwrap();
+    let torrent = lava_torrent::torrent::v1::TorrentBuilder::new(path, piece as i64)
+        .set_num_threads(2)
+        .build()
+        .unwrap();
+    let mut metadata = Vec::new();
+    torrent.write_into(&mut metadata).unwrap();
+    let mut partial = payload.clone();
+    // These pieces fail hash verification, leaving islands at the beginning,
+    // middle and end, including the final short piece.
+    partial[piece..piece * 2].fill(0);
+    partial[piece * 3..piece * 4].fill(0);
+    std::fs::write(downloads.join("movie.mp4"), partial).unwrap();
+    let core = Core::new(root.path().join("profile"), true).await.unwrap();
+    let handle = core
+        .api
+        .session()
+        .add_torrent(
+            AddTorrent::TorrentFileBytes(metadata.into()),
+            Some(AddTorrentOptions {
+                output_folder: Some(downloads.to_string_lossy().into()),
+                paused: true,
+                overwrite: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_handle()
+        .unwrap();
+    timeout(Duration::from_secs(20), handle.wait_until_initialized())
+        .await
+        .unwrap()
+        .unwrap();
+    let expected = vec![
+        [0, piece as u64],
+        [(piece * 2) as u64, (piece * 3) as u64],
+        [(piece * 4) as u64, payload.len() as u64],
+    ];
+    for live in [false, true] {
+        if live {
+            core.action(handle.id(), "resume").await.unwrap();
+        }
+        let map = core.file_pieces(handle.id(), 0).unwrap().unwrap();
+        assert_eq!(map.ranges, expected);
+        assert_eq!(map.downloaded_bytes, (payload.len() - piece * 2) as u64);
+        assert_eq!(map.file_length, payload.len() as u64);
+        let json = serde_json::to_value(&map).unwrap();
+        assert_eq!(json["fileLength"], payload.len());
+        assert_eq!(json["downloadedBytes"], payload.len() - piece * 2);
+    }
+    assert!(core.file_pieces(handle.id(), 1).is_err());
+    assert!(core.file_pieces(usize::MAX, 0).is_err());
+    core.api.session().stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_seed_download_stream_select_resume_and_remove() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
@@ -117,6 +183,9 @@ async fn create_seed_download_stream_select_resume_and_remove() {
         .await
         .unwrap()
         .unwrap();
+    let pieces = client.file_pieces(added.id(), movie).unwrap().unwrap();
+    assert_eq!(pieces.file_length, payload.len() as u64);
+    assert_eq!(pieces.ranges, vec![[0, payload.len() as u64]]);
     assert_eq!(
         tokio::fs::read(download_dir.join("movie.mp4"))
             .await

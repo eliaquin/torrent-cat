@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Playing, Snapshot, clock, bytes } from "./types";
+import { Playing, Snapshot, clock } from "./types";
 import { Button, Icon } from "./ui";
 import { createVideoClickHandler, resolvePlaybackEngine } from "./player-controls";
 import { TrackMenu } from "./track-menu";
+import { DownloadMap } from "./download-map";
 import { usePlayerPresentation } from "./use-player-presentation";
 type Track = { id: number; name: string };
 type NativeStatus = {
@@ -510,13 +511,7 @@ export function Player({
               )}
               onChange={(e) => seek(Number(e.target.value))}
             />
-            <progress
-              className="download-progress"
-              aria-label="Download progress"
-              title={`${bytes(torrent?.stats?.progress_bytes || 0)} of ${bytes(torrent?.stats?.total_bytes || 0)} downloaded`}
-              max={torrent?.stats?.total_bytes || 1}
-              value={torrent?.stats?.progress_bytes || 0}
-            />
+            <DownloadMap key={`${playing.id}:${playing.index}`} id={playing.id} index={playing.index} />
           </div>
           <span>{clock(duration)}</span>
         </div>

@@ -7,6 +7,7 @@ mod jobs;
 mod media;
 mod native;
 mod notifications;
+mod piece_map;
 mod playback;
 mod watcher;
 use core::{Core, Preferences};
@@ -33,6 +34,14 @@ struct AppState {
 #[tauri::command]
 async fn snapshot(s: tauri::State<'_, AppState>) -> Cmd<Value> {
     s.core.snapshot().await.map_err(err)
+}
+#[tauri::command]
+async fn file_pieces(
+    s: tauri::State<'_, AppState>,
+    id: usize,
+    index: usize,
+) -> Cmd<Option<piece_map::FilePieces>> {
+    s.core.file_pieces(id, index).map_err(err)
 }
 #[tauri::command]
 async fn add_torrent(
@@ -441,6 +450,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             snapshot,
+            file_pieces,
             add_torrent,
             torrent_action,
             select_files,

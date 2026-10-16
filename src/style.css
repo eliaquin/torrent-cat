@@ -1092,16 +1092,15 @@ html.native-playback,
   right: 0;
   z-index: 2;
   transition: opacity 150ms;
+  background: rgb(23 25 29 / 70%);
 }
 .player-fullscreen .player-toolbar {
   top: 0;
   height: 64px;
-  background: #17191d;
 }
 .player-fullscreen .player-bottom {
   bottom: 0;
   padding-top: 30px;
-  background: #17191d;
 }
 .player-fullscreen .controls-hidden .player-toolbar,
 .player-fullscreen .controls-hidden .player-bottom {
@@ -1210,15 +1209,14 @@ html.native-playback,
   width: calc(100% - 6px);
   margin-inline: 3px;
   height: 2px;
-  appearance: none;
-  border: 0;
+  display: block;
+  flex-shrink: 0;
+  background: #343b44;
   border-radius: 2px;
   overflow: hidden;
   opacity: .65;
 }
-.download-progress::-webkit-progress-bar { background: #343b44; }
-.download-progress::-webkit-progress-value { background: #71d5e6; }
-.download-progress::-moz-progress-bar { background: #71d5e6; }
+.download-progress path { fill: #71d5e6; }
 input[type="range"] {
   accent-color: #71d5e6;
   height: 14px;
