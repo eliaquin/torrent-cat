@@ -16,6 +16,7 @@
     "bundle": "tauri build --bundles app && node scripts/sign-local.mjs",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test:player": "node --experimental-strip-types --test tests/player-controls.test.mjs",
+    "test:library": "node --experimental-strip-types --test tests/library.test.mjs",
     "check": "tsc --noEmit && cargo check --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {

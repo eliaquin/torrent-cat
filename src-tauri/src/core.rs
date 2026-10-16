@@ -49,6 +49,7 @@ pub struct Profile {
     pub positions: HashMap<String, f64>,
     pub imported: Vec<String>,
     pub suspended_for_playback: Vec<String>,
+    pub torrent_order: Vec<String>,
 }
 pub fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
@@ -112,6 +113,7 @@ impl Core {
             jobs: tokio::sync::Semaphore::new(2),
             playback_transition: Mutex::new(()),
         });
+        core.initialize_torrent_order().await?;
         if let Err(error) = core.restore_playback_transfers().await {
             eprintln!("Unable to restore transfers after playback: {error}");
         }
@@ -119,6 +121,37 @@ impl Core {
     }
     pub async fn save(&self, profile: &Profile) -> Result<()> {
         atomic_json(&self.directory.join("profile.json"), profile).await
+    }
+    async fn initialize_torrent_order(&self) -> Result<()> {
+        let mut torrents = self.api.api_torrent_list().torrents;
+        // Older profiles have no insertion history. Seed a stable order from
+        // persisted engine IDs, then keep future ordering by info hash.
+        torrents.sort_by_key(|t| std::cmp::Reverse(t.id));
+        let mut profile = self.profile.lock().await;
+        let mut next = profile.clone();
+        next.torrent_order
+            .retain(|hash| torrents.iter().any(|t| &t.info_hash == hash));
+        let missing: Vec<_> = torrents
+            .iter()
+            .filter(|t| !next.torrent_order.contains(&t.info_hash))
+            .map(|t| t.info_hash.clone())
+            .collect();
+        next.torrent_order.splice(0..0, missing);
+        if next.torrent_order != profile.torrent_order {
+            self.save(&next).await?;
+            *profile = next;
+        }
+        Ok(())
+    }
+    async fn record_added(&self, hash: &str) -> Result<()> {
+        let mut profile = self.profile.lock().await;
+        if !profile.torrent_order.iter().any(|h| h == hash) {
+            let mut next = profile.clone();
+            next.torrent_order.insert(0, hash.into());
+            self.save(&next).await?;
+            *profile = next;
+        }
+        Ok(())
     }
     pub async fn snapshot(&self) -> Result<Value> {
         let mut list = self
@@ -132,6 +165,20 @@ impl Core {
             }
         }
         let profile = self.profile.lock().await.clone();
+        let ranks: HashMap<_, _> = profile
+            .torrent_order
+            .iter()
+            .enumerate()
+            .map(|(rank, hash)| (hash.as_str(), rank))
+            .collect();
+        list.torrents.sort_by(|a, b| {
+            ranks
+                .get(a.info_hash.as_str())
+                .unwrap_or(&usize::MAX)
+                .cmp(ranks.get(b.info_hash.as_str()).unwrap_or(&usize::MAX))
+                .then_with(|| b.id.cmp(&a.id))
+                .then_with(|| a.info_hash.cmp(&b.info_hash))
+        });
         Ok(
             json!({"torrents":list.torrents,"profile":profile,"tools":crate::jobs::tools(),"downloadPathExists":Path::new(&profile.prefs.download_path).is_dir(),"version":"0.1.0"}),
         )
@@ -177,6 +224,13 @@ impl Core {
             librqbit::AddTorrentResponse::ListOnly(p) => p,
             librqbit::AddTorrentResponse::AlreadyManaged(id, _)
             | librqbit::AddTorrentResponse::Added(id, _) => {
+                self.record_added(
+                    &self
+                        .api
+                        .api_torrent_details(TorrentIdOrHash::Id(id))?
+                        .info_hash,
+                )
+                .await?;
                 return Ok(
                     json!({"id":id,"details":self.api.api_torrent_details(TorrentIdOrHash::Id(id))?}),
                 );
@@ -213,6 +267,7 @@ impl Core {
                 }),
             )
             .await?;
+        self.record_added(&response.details.info_hash).await?;
         Ok(serde_json::to_value(response)?)
     }
     pub async fn action(&self, id: usize, action: &str) -> Result<()> {
@@ -255,6 +310,13 @@ impl Core {
                 self.api.api_torrent_action_delete(key).await?;
             }
             _ => bail!("Unknown torrent action"),
+        }
+        if matches!(action, "remove" | "delete") {
+            let mut profile = self.profile.lock().await;
+            let mut next = profile.clone();
+            next.torrent_order.retain(|h| h != &hash);
+            self.save(&next).await?;
+            *profile = next;
         }
         Ok(())
     }
@@ -331,6 +393,7 @@ impl Core {
                 }),
             )
             .await?;
+        self.record_added(&response.details.info_hash).await?;
         Ok(serde_json::to_value(response)?)
     }
     pub async fn import_legacy(&self, path: String) -> Result<Value> {

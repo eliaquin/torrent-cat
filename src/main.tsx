@@ -15,9 +15,11 @@ import {
   status,
   playable,
   isVideo,
+  posterFileIndex,
 } from "./types";
 import { VlcRecommendation } from "./vlc-recommendation";
 import { Player } from "./player";
+import { FullName } from "./full-name";
 import "./style.css";
 import { playSound } from "./sound";
 const pickTorrent = () =>
@@ -212,11 +214,7 @@ function App() {
   useEffect(() => {
     if (!data || page === "player" || !data.tools.ffmpeg) return;
     for (const t of data.torrents) {
-      const index =
-        t.files?.findIndex(
-          (f, i) =>
-            isVideo(f.name) && (t.stats?.file_progress[i] || 0) >= f.length,
-        ) ?? -1;
+      const index = posterFileIndex(t);
       if (index < 0 || postersRequested.current.has(t.info_hash)) continue;
       postersRequested.current.add(t.info_hash);
       void invoke<string>("media_poster", { id: t.id, index })
@@ -272,7 +270,7 @@ function App() {
         </nav>
         <div className="title" data-tauri-drag-region>
           {page === "player"
-            ? playing?.name
+            ? <FullName name={playing?.name || ""} />
             : page === "create"
               ? "Create torrent"
               : ""}
@@ -395,8 +393,8 @@ function App() {
                       )}
                     </button>
                     <div className="torrent-body">
-                      <h2 className="name" title={t.name}>
-                        {t.name || "Getting torrent metadata…"}
+                      <h2 className="name">
+                        <FullName name={t.name || "Getting torrent metadata…"} />
                       </h2>
                       <div
                         className={
@@ -540,11 +538,10 @@ function App() {
                                 <td className="col-name">
                                   <button
                                     className="file-open"
-                                    title={f.name}
                                     disabled={!playable(f.name)}
                                     onClick={() => play(t, i)}
                                   >
-                                    {f.name}
+                                    <FullName name={f.name} />
                                   </button>
                                 </td>
                                 <td className="col-progress">

@@ -9,6 +9,7 @@ import {
 import { Snapshot, Preferences } from "./types";
 import { VlcRecommendation } from "./vlc-recommendation";
 import { Button, Icon } from "./ui";
+type DefaultHandlers = { torrentFiles: boolean; magnetLinks: boolean };
 export function Settings({
   data,
   refresh,
@@ -21,6 +22,19 @@ export function Settings({
   const [prefs, setPrefs] = useState(data.profile.prefs),
     [startup, setStartup] = useState(false),
     [saving, setSaving] = useState(false);
+  const [handlers, setHandlers] = useState<DefaultHandlers | null>(null);
+  const [settingDefault, setSettingDefault] = useState(false);
+  useEffect(() => {
+    let active = true;
+    const refreshDefaults = () => {
+      void invoke<DefaultHandlers>("default_handlers")
+        .then((value) => { if (active) setHandlers(value); })
+        .catch((error) => { if (active) report(error); });
+    };
+    refreshDefaults();
+    window.addEventListener("focus", refreshDefaults);
+    return () => { active = false; window.removeEventListener("focus", refreshDefaults); };
+  }, [report]);
   useEffect(() => {
     void isEnabled().then(setStartup).catch(report);
   }, []);
@@ -214,6 +228,31 @@ export function Settings({
             description="A few everyday details, just the way you like them."
           >
             <div className="preference">
+              <strong>Default torrent application</strong>
+              <p>Open .torrent files and magnet links with TorrentCat.</p>
+              <p role="status">
+                {handlers
+                  ? `.torrent files: ${handlers.torrentFiles ? "TorrentCat" : "Not default"} · Magnet links: ${handlers.magnetLinks ? "TorrentCat" : "Not default"}`
+                  : "Checking macOS defaults…"}
+              </p>
+              <Button
+                disabled={settingDefault || !!(handlers?.torrentFiles && handlers?.magnetLinks)}
+                onClick={async () => {
+                  setSettingDefault(true);
+                  try {
+                    setHandlers(await invoke<DefaultHandlers>("set_default_handlers"));
+                  } catch (error) {
+                    report(error);
+                  } finally {
+                    await invoke<DefaultHandlers>("default_handlers").then(setHandlers).catch(report);
+                    setSettingDefault(false);
+                  }
+                }}
+              >
+                {settingDefault ? "Updating…" : handlers?.torrentFiles && handlers?.magnetLinks ? "Default application" : "Make default"}
+              </Button>
+            </div>
+            <div className="preference">
               <label className="toggle-row">
                 Open TorrentCat on startup
                 <input
@@ -261,7 +300,7 @@ export function Settings({
                         (await requestPermission()) !== "granted"
                       ) {
                         report(
-                          "Allow notifications for TorrentCat Next in macOS System Settings to enable completion alerts.",
+                          "Allow notifications for TorrentCat in macOS System Settings to enable completion alerts.",
                         );
                         return;
                       }
@@ -278,12 +317,8 @@ export function Settings({
               <p>Show a macOS notification when a new download finishes.</p>
             </div>
             <div className="preference">
-              <strong>TorrentCat Next</strong>
+              <strong>TorrentCat</strong>
               <p>Version {data.version} · macOS · Rust and Tauri</p>
-              <p>
-                This local build has a separate profile from the original
-                TorrentCat.
-              </p>
             </div>
           </Section>
           <Section

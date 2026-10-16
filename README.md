@@ -1,10 +1,11 @@
-# TorrentCat Next
+# TorrentCat
 
 A macOS app for downloading and streaming torrents, built with Tauri, Rust, React and TypeScript. Powered by librqbit.
 
 ## Features
 
 - Open torrent files, magnet links, info hashes and torrent URLs.
+- Set TorrentCat as the default app for `.torrent` files and magnet links in Preferences → General.
 - Download, seed, pause, resume and select individual files.
 - Play media while it downloads, with seeking, subtitles and saved playback positions.
 - Use embedded VLC 3 by default, with built-in playback when VLC is unavailable. Choose a different player in Preferences.
@@ -28,7 +29,7 @@ Build the macOS application:
 npm run bundle
 ```
 
-Copy `src-tauri/target/release/bundle/macos/TorrentCat Next.app` to Applications. The build is ad-hoc signed, not notarized.
+Copy `src-tauri/target/release/bundle/macos/TorrentCat.app` to Applications. The build is ad-hoc signed, not notarized.
 
 Currently tested on Apple Silicon. No prebuilt releases are available. Linux and Windows are not supported yet.
 
@@ -61,6 +62,7 @@ Downloads use the folder selected in Preferences. Generated media caches current
 npm run check   # TypeScript and Rust checks
 npm test        # Rust unit and integration tests
 npm run test:player # Player control visibility tests
+npm run test:library # Library preview selection tests
 npm run build  # Frontend production build
 ```
 

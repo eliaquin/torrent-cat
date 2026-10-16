@@ -6035,6 +6035,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
+ "block2",
  "encoding_rs",
  "futures-core",
  "lava_torrent",

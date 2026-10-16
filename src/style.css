@@ -842,7 +842,7 @@ a {
   border-radius: 9px 9px 0 0;
 }
 .danger {
-  color: #ffb3aa !important;
+  color: var(--danger-text, #ffb3aa) !important;
 }
 .empty-actions {
   display: flex;
@@ -917,6 +917,7 @@ a {
   padding: 70px 20px 20px;
 }
 .dialog {
+  --danger-text: #b42318;
   width: 560px;
   max-width: 100%;
   max-height: 100%;
@@ -954,6 +955,12 @@ a {
 }
 .dialog .shelf-primary:hover {
   background: #00695c;
+}
+.dialog .shelf-button.danger {
+  border-color: var(--danger-text);
+}
+.dialog .shelf-button.danger:hover:not(:disabled) {
+  background: #fee4e2;
 }
 .dialog-actions {
   display: flex;
@@ -1156,6 +1163,28 @@ html.native-playback,
   min-width: 0;
   position: relative;
   height: 24px;
+}
+.full-name {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.full-name-popup {
+  position: fixed;
+  z-index: 10000;
+  max-width: min(640px, calc(100vw - 24px));
+  padding: 10px 12px;
+  border: 1px solid #56616e;
+  border-radius: 8px;
+  background: #22272e;
+  color: #f3f5f7;
+  box-shadow: 0 6px 24px #0008;
+  font: 13px/1.5 system-ui, sans-serif;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  pointer-events: none;
 }
 .player-controls {
   display: flex;

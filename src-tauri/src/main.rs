@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod core;
+mod defaults;
 mod inbox;
 #[cfg(test)]
 mod integration_tests;
@@ -26,6 +27,14 @@ use tauri_plugin_deep_link::DeepLinkExt;
 type Cmd<T> = Result<T, String>;
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
+}
+#[tauri::command]
+async fn default_handlers(app: tauri::AppHandle) -> Cmd<defaults::DefaultHandlers> {
+    defaults::status(app).await
+}
+#[tauri::command]
+async fn set_default_handlers(app: tauri::AppHandle) -> Cmd<defaults::DefaultHandlers> {
+    defaults::set(app).await
 }
 struct AppState {
     core: Arc<Core>,
@@ -449,6 +458,8 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            default_handlers,
+            set_default_handlers,
             snapshot,
             file_pieces,
             add_torrent,

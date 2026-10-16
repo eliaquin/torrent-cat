@@ -8,6 +8,7 @@ import { Button, Icon } from "./ui";
 import { createVideoClickHandler, handlePlayerEscape, resolvePlaybackEngine } from "./player-controls";
 import { TrackMenu } from "./track-menu";
 import { PlaybackTimeline } from "./playback-timeline";
+import { FullName } from "./full-name";
 import { usePlayerPresentation } from "./use-player-presentation";
 type Track = { id: number; name: string };
 type NativeStatus = {
@@ -420,8 +421,8 @@ export function Player({
         {presentation.fullscreen && (
           <Button icon="arrow_back" title="Back to library" onClick={onBack} />
         )}
-        <span className="player-filename" title={playing.name}>
-          {playing.name.split("/").pop()}
+        <span className="player-filename">
+          <FullName name={playing.name} />
         </span>
       </div>
       <div

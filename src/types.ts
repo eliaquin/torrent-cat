@@ -53,6 +53,17 @@ export const playable = (name: string) =>
   );
 export const isVideo = (name: string) =>
   /\.(mp4|m4v|mov|mkv|webm|avi|m2ts|ts)$/i.test(name);
+export function posterFileIndex(torrent: Torrent): number {
+  let largest = -1;
+  torrent.files?.forEach((file, index, files) => {
+    if (isVideo(file.name) && (largest < 0 || file.length > files[largest].length)) {
+      largest = index;
+    }
+  });
+  // Wait for the largest video rather than caching a completed sample's image.
+  if (largest < 0 || (torrent.stats?.file_progress[largest] ?? 0) < torrent.files![largest].length) return -1;
+  return largest;
+}
 export function bytes(n: number) {
   if (!Number.isFinite(n) || n <= 0) return "0 B";
   const i = Math.min(4, Math.floor(Math.log(n) / Math.log(1024)));

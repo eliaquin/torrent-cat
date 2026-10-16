@@ -63,3 +63,15 @@ This does not certify every public swarm/tracker/NAT configuration, arbitrary co
 | Go from the beginning to running locally | Build commands and source are present; installed binary SHA-256 matches the built binary (`52de9c507154aca0e5e4f1d0a060e88039a4c2d366804c0d5cd48420b9e12980`); updated app visibly launches with the preserved test library. |
 
 This audit establishes the requested local Mac app and researched implementation, with the documented approximations allowed by the original “same or as close as possible” requirement. It does not treat later public distribution or exact protocol parity as completed.
+## Desktop preferences and library — 2026-10-16
+
+- `npm run check`, 20 Rust tests and 16 player tests pass; the public-network smoke test remains skipped. The release bundle builds and passes ad-hoc signature verification.
+- The installed app is named `TorrentCat.app`. Its existing bundle identifier and profile location are retained; all nine library items, preferences and playback positions survived the update.
+- Preferences displays macOS's current `.torrent` and magnet handlers. The “Make default” action uses NSWorkspace and reports native errors; changing the user's associations was not exercised during validation.
+- Integration tests cover newest-first ordering, duplicate additions, removal and re-addition, restart persistence and migration of profiles without ordering history.
+- A long library title was checked in the installed app: its hover tooltip wraps and exposes the full name outside the card boundary. File names and player titles use the same component.
+
+## Largest-video preview — 2026-10-16
+
+- Library previews select the largest video by file size and wait until that file is complete. Completed samples do not override it. Existing poster caches are keyed by source file, so another video's cached image is not reused.
+- Four library regression tests cover file ordering, larger non-video files, an incomplete main video with a complete sample, missing metadata/progress, audio-only torrents, single videos and equal-size ties.

@@ -4,6 +4,101 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn newest_torrents_stay_first_across_duplicates_removal_and_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("profile");
+    let core = Core::new(directory.clone(), true).await.unwrap();
+    let mut added = Vec::new();
+    for name in ["first", "second", "third"] {
+        let source = root.path().join(format!("{name}.txt"));
+        std::fs::write(&source, name.repeat(1000)).unwrap();
+        let metadata = root.path().join(format!("{name}.torrent"));
+        let result = core
+            .create(
+                source.to_string_lossy().into(),
+                metadata.to_string_lossy().into(),
+                false,
+                String::new(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        added.push(result["details"]["info_hash"].as_str().unwrap().to_owned());
+    }
+    async fn order(core: &Core) -> Vec<String> {
+        core.snapshot().await.unwrap()["torrents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["info_hash"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    assert_eq!(
+        order(&core).await,
+        vec![added[2].clone(), added[1].clone(), added[0].clone()]
+    );
+    let metadata = root
+        .path()
+        .join("first.torrent")
+        .to_string_lossy()
+        .into_owned();
+    let existing = core
+        .add(
+            metadata.clone(),
+            Some(root.path().to_string_lossy().into()),
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        order(&core).await,
+        vec![added[2].clone(), added[1].clone(), added[0].clone()]
+    );
+    core.action(existing["id"].as_u64().unwrap() as usize, "remove")
+        .await
+        .unwrap();
+    core.add(
+        metadata,
+        Some(root.path().to_string_lossy().into()),
+        true,
+        true,
+    )
+    .await
+    .unwrap();
+    let expected = vec![added[0].clone(), added[2].clone(), added[1].clone()];
+    assert_eq!(order(&core).await, expected);
+    for torrent in core.api.api_torrent_list().torrents {
+        core.action(torrent.id.unwrap(), "pause").await.unwrap();
+    }
+    core.api.session().stop().await;
+    drop(core);
+    let restored = Core::new(directory.clone(), true).await.unwrap();
+    assert_eq!(order(&restored).await, expected);
+    assert_eq!(order(&restored).await, expected);
+    restored.api.session().stop().await;
+    drop(restored);
+
+    // Old profiles acquire a stable persisted order without losing settings.
+    let path = directory.join("profile.json");
+    let mut profile: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    profile.as_object_mut().unwrap().remove("torrentOrder");
+    std::fs::write(&path, serde_json::to_vec(&profile).unwrap()).unwrap();
+    let migrated = Core::new(directory.clone(), true).await.unwrap();
+    let stable = order(&migrated).await;
+    assert_eq!(stable.len(), 3);
+    assert_eq!(migrated.profile.lock().await.torrent_order, stable);
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(saved["prefs"], profile["prefs"]);
+    migrated.api.session().stop().await;
+    drop(migrated);
+    let restarted = Core::new(directory, true).await.unwrap();
+    assert_eq!(order(&restarted).await, stable);
+    restarted.api.session().stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn piece_map_reports_verified_islands_while_paused_and_live() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
