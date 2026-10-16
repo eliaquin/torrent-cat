@@ -775,3 +775,27 @@ async fn duplicate_public_tracker_sources_do_not_duplicate_announces() {
     assert!(records.iter().any(|r| r.event().is_empty()));
     client.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn extreme_http_interval_recovers_without_panic_or_immediate_retry() {
+    let tracker = Tracker::http(u64::MAX, 0).await;
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let bytes = fixture(&source, vec![tracker.url.clone()]);
+    let client = session(&source, None).await;
+    let _ = add(&client, &bytes, &source, None, vec![], vec![]).await;
+    tracker.wait(|r| !r.is_empty()).await;
+    // The next response is valid. The monitor must recover after its normal
+    // error backoff instead of dying or retrying in a tight loop.
+    {
+        let mut state = tracker.state.lock().unwrap();
+        state.interval = 1;
+    }
+    tracker.wait(|r| r.len() >= 3).await;
+    let records = tracker.records();
+    assert!(records[1].at.duration_since(records[0].at) >= Duration::from_secs(9));
+    assert_eq!(records[1].event(), "started");
+    assert_eq!(records[2].event(), "");
+    client.stop().await;
+    assert_eq!(tracker.records().last().unwrap().event(), "stopped");
+}

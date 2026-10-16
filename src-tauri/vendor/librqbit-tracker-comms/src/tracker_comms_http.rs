@@ -14,6 +14,8 @@ use librqbit_core::{
     hash_id::Id20,
 };
 
+pub(crate) const MAX_PEERS: usize = 2000;
+
 #[derive(Clone, Copy)]
 pub enum TrackerRequestEvent {
     Started,
@@ -115,6 +117,9 @@ where
             {
                 let mut addrs = Vec::new();
                 while let Some(peer) = seq.next_element::<DictPeer>()? {
+                    if addrs.len() >= MAX_PEERS {
+                        return Err(serde::de::Error::custom("too many tracker peers"));
+                    }
                     addrs.push(SocketAddr::from((peer.ip, peer.port)))
                 }
                 Ok(Peers::DictPeers(addrs))
@@ -124,6 +129,11 @@ where
             where
                 E: serde::de::Error,
             {
+                if v.len() % AddrType::fixed_len() != 0
+                    || v.len() / AddrType::fixed_len() > MAX_PEERS
+                {
+                    return Err(E::custom("invalid or excessive compact peers"));
+                }
                 Ok(Peers::Compact(CompactListInBuffer::new_from_buf(v.into())))
             }
         }
@@ -263,5 +273,37 @@ mod tests {
                     .unwrap()
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod limits_tests {
+    use super::*;
+    #[test]
+    fn compact_and_dictionary_peer_lists_are_bounded() {
+        for count in [MAX_PEERS, MAX_PEERS + 1] {
+            let peers = vec![0u8; count * 6];
+            let bytes = [
+                format!("d8:intervali1e5:peers{}:", peers.len()).into_bytes(),
+                peers,
+                b"e".to_vec(),
+            ]
+            .concat();
+            assert_eq!(
+                bencode::from_bytes::<TrackerResponse>(&bytes).is_ok(),
+                count == MAX_PEERS
+            );
+            let bytes = [
+                b"d8:intervali1e5:peersl".to_vec(),
+                b"d2:ip9:127.0.0.14:porti1ee".repeat(count),
+                b"ee".to_vec(),
+            ]
+            .concat();
+            assert_eq!(
+                bencode::from_bytes::<TrackerResponse>(&bytes).is_ok(),
+                count == MAX_PEERS
+            );
+        }
+        assert!(bencode::from_bytes::<TrackerResponse>(b"d8:intervali1e5:peers1:xe").is_err());
     }
 }

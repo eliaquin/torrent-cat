@@ -161,8 +161,13 @@ impl TrackerComms {
                 _ = self.cancel.cancelled() => break,
                 result = timeout(Duration::from_secs(10), self.request(&url, event, tracker_id.as_deref())) => result.unwrap_or_else(|_| Err(anyhow::anyhow!("tracker request timed out"))),
             };
+            // Reject unrepresentable deadlines before changing announce state.
+            let result = result.and_then(|reply| {
+                let deadline = checked_deadline(reply.interval, self.force_tracker_interval)?;
+                Ok((reply, deadline))
+            });
             match result {
-                Ok(reply) => {
+                Ok((reply, deadline)) => {
                     if reply.tracker_id.is_some() {
                         tracker_id = reply.tracker_id;
                     }
@@ -172,11 +177,7 @@ impl TrackerComms {
                         completed = true;
                     }
                     retry = Duration::from_secs(10);
-                    next = Instant::now()
-                        + self
-                            .force_tracker_interval
-                            .unwrap_or(reply.interval)
-                            .max(reply.interval);
+                    next = deadline;
                     for peer in reply.peers {
                         tokio::select! {
                             _ = self.cancel.cancelled() => break,
@@ -290,14 +291,24 @@ impl TrackerComms {
         if !response.status().is_success() {
             bail!("tracker HTTP status {}", response.status());
         }
-        let bytes = response.bytes().await.map_err(|e| e.without_url())?;
-        if let Ok((error, _)) = bencode::from_bytes_with_rest::<http::TrackerError>(&bytes) {
+        let bytes = crate::read_bounded_http_body(response, 1024 * 1024).await?;
+        if let Ok(error) = bencode::from_bytes::<http::TrackerError>(&bytes) {
             let _ = error.failure_reason; // Do not echo tracker text containing credentials.
             bail!("tracker rejected announce");
         }
-        let response = bencode::from_bytes_with_rest::<http::TrackerResponse>(&bytes)
-            .map_err(|_| anyhow::anyhow!("invalid tracker response"))?
-            .0;
+        let response = bencode::from_bytes::<http::TrackerResponse>(&bytes)
+            .map_err(|_| anyhow::anyhow!("invalid tracker response"))?;
+        anyhow::ensure!(
+            response.iter_peers().count() <= http::MAX_PEERS,
+            "too many tracker peers"
+        );
+        anyhow::ensure!(
+            response
+                .tracker_id
+                .as_ref()
+                .is_none_or(|id| id.as_ref().len() <= 4096),
+            "tracker ID too large"
+        );
         Ok(Reply {
             interval: Duration::from_secs(
                 response
@@ -308,5 +319,27 @@ impl TrackerComms {
             peers: response.iter_peers().collect(),
             tracker_id: response.tracker_id.map(|id| id.as_ref().to_vec()),
         })
+    }
+}
+
+fn checked_deadline(interval: Duration, forced: Option<Duration>) -> anyhow::Result<Instant> {
+    Instant::now()
+        .checked_add(forced.unwrap_or(interval).max(interval))
+        .context("tracker interval cannot be represented")
+}
+
+#[cfg(test)]
+mod interval_tests {
+    use super::*;
+    #[test]
+    fn extreme_intervals_are_recoverable_and_minimum_is_preserved() {
+        assert!(checked_deadline(Duration::from_secs(u64::MAX), None).is_err());
+        assert!(checked_deadline(Duration::from_secs(1), Some(Duration::MAX)).is_err());
+        let before = Instant::now();
+        assert!(
+            checked_deadline(Duration::from_secs(60), Some(Duration::from_secs(1))).unwrap()
+                >= before + Duration::from_secs(60)
+        );
+        assert!(checked_deadline(Duration::ZERO, None).is_ok());
     }
 }

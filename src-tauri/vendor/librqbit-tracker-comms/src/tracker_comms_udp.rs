@@ -205,6 +205,10 @@ impl Response {
 
                     let (port, b2) = u16::parse_num(b)?;
                     b = b2;
+                    anyhow::ensure!(
+                        addrs.len() < super::tracker_comms_http::MAX_PEERS,
+                        "too many tracker peers"
+                    );
                     addrs.push(SocketAddr::new(addr, port));
                 }
                 buf = b;

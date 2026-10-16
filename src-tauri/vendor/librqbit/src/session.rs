@@ -160,21 +160,21 @@ async fn torrent_from_url(
     reqwest_client: &reqwest::Client,
     url: &str,
 ) -> anyhow::Result<ParsedTorrentFile> {
-    let response = reqwest_client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| e.without_url())
-        .context("error downloading torrent metadata")?;
-    if !response.status().is_success() {
-        bail!("torrent metadata request returned {}", response.status())
-    }
-    let b = response
-        .bytes()
-        .await
-        .map_err(|e| e.without_url())
-        .context("error reading torrent metadata")?;
-    torrent_from_bytes(b).context("error decoding torrent")
+    let b = tokio::time::timeout(Duration::from_secs(30), async {
+        let response = reqwest_client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| e.without_url())
+            .context("error downloading torrent metadata")?;
+        if !response.status().is_success() {
+            bail!("torrent metadata request returned {}", response.status());
+        }
+        tracker_comms::read_bounded_http_body(response, bencode::MAX_INPUT_BYTES).await
+    })
+    .await
+    .context("torrent metadata download timed out")??;
+    torrent_from_bytes(b.into()).context("error decoding torrent")
 }
 
 fn compute_only_files_regex<ByteBuf: AsRef<[u8]>>(
@@ -328,14 +328,20 @@ pub fn read_local_file_including_stdin(filename: &str) -> anyhow::Result<Vec<u8>
     let mut buf = Vec::new();
     if filename == "-" {
         std::io::stdin()
+            .take(bencode::MAX_INPUT_BYTES as u64 + 1)
             .read_to_end(&mut buf)
             .context("error reading stdin")?;
     } else {
         std::fs::File::open(filename)
             .context("error opening")?
+            .take(bencode::MAX_INPUT_BYTES as u64 + 1)
             .read_to_end(&mut buf)
             .context("error reading")?;
     }
+    anyhow::ensure!(
+        buf.len() <= bencode::MAX_INPUT_BYTES,
+        "torrent metadata exceeds size limit"
+    );
     Ok(buf)
 }
 
