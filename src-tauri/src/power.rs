@@ -61,8 +61,8 @@ mod tests {
             .await
             .unwrap();
         assert!(output.status.success());
-        String::from_utf8(output.stdout)
-            .unwrap()
+        // pmset can include non-UTF-8 bytes in unrelated audio device names.
+        String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter(|line| line.contains(&format!("pid {pid}(")))
             .collect::<Vec<_>>()

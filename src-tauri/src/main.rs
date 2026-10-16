@@ -459,8 +459,12 @@ fn main() {
                 }
             });
             menus(app)?;
-            watcher::start(core.clone(), app.handle().clone());
-            notifications::start(core, app.handle().clone());
+            // Setup runs on the UI thread. Session-managed tasks use Tokio's
+            // spawn, so enter Tauri's runtime before starting either service.
+            tauri::async_runtime::block_on(async {
+                watcher::start(core.clone(), app.handle().clone());
+                notifications::start(core, app.handle().clone());
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
