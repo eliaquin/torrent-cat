@@ -140,6 +140,7 @@ pub struct Session {
     // Limits and throttling
     pub(crate) concurrent_initialize_semaphore: Arc<tokio::sync::Semaphore>,
     pub ratelimits: Limits,
+    pub(crate) upload_slots: Arc<tokio::sync::Semaphore>,
 
     pub blocklist: IpRanges,
     pub allowlist: Option<IpRanges>,
@@ -815,6 +816,9 @@ impl Session {
                 )),
                 udp_tracker_client,
                 ratelimits: Limits::new(opts.ratelimits),
+                upload_slots: Arc::new(tokio::sync::Semaphore::new(
+                    crate::upload_queue::SESSION_REQUESTS,
+                )),
                 ipv4_only: opts.ipv4_only,
                 trackers: opts.trackers,
                 disable_trackers: opts.disable_trackers,

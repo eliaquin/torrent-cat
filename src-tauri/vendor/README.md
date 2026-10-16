@@ -19,6 +19,8 @@ TorrentCat modifications:
 - Verify every disk piece on restart and explicit paused rechecks. Persist optional
   filesystem checkpoints only after payload sync, using atomic replacement and
   directory sync; never flush unsynced bitmaps on drop.
+- Bound upload admission across peer/session queues, honor cancellation and interest,
+  schedule ready peers round robin and bound writer/metadata request queues.
 - Track actual payload bytes across pauses, independently of verified disk data.
 - Calculate tracker `left` across all files, including deselected files.
 - Send HTTP/UDP lifecycle events and await bounded stopped requests on pause,
@@ -39,6 +41,8 @@ Bencode changes are in `librqbit-bencode/src/{deserialize.rs,lib.rs}`; the bound
 HTTP reader is `librqbit-tracker-comms/src/http_body.rs`. Checkpoint/recheck changes also touch `bitv.rs`, `bitv_factory.rs`,
 `session_persistence/{json.rs,postgres.rs}`, `storage/mod.rs`,
 `storage/filesystem/opened_file.rs` and `torrent_state/initializing.rs`.
+Upload changes also touch `upload_queue.rs`, `peer_connection.rs`, `limits.rs` and
+`torrent_state/live/peer/mod.rs`.
 Other vendored sources retain their upstream implementation.
 
 Regression tests live in `../src/tracker_tests.rs` and

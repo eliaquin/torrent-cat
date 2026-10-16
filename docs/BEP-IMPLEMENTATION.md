@@ -9,8 +9,8 @@ Las referencias de líneas de la auditoría describen el commit base, no el cód
 | F1 — aislamiento de archivos | Integrado en `df35676` y publicado; 35 pruebas pasan, 1 ignorada | `tests/storage_confinement.rs` |
 | F2 — asociación de respuestas UDP | Integrado en `eb6252f` y publicado | Pruebas UDP del crate y `tracker_tests` |
 | F3 — límites de entradas | Integrado en `4c970bd` y publicado | Parser, cuerpos HTTP, URL y tracker locales |
-| F4 — integridad y durabilidad de reanudación | Implementado, revisado y validado | Hash completo, checkpoints y recheck manual |
-| F5 — capacidad, cancelación y equidad de subida | Pendiente | |
+| F4 — integridad y durabilidad de reanudación | Integrado en `0b5d79c` y publicado | Hash completo, checkpoints y recheck manual |
+| F5 — capacidad, cancelación y equidad de subida | Implementado, revisado y validado | Colas acotadas y peer loopback |
 | F6 — niveles y failover de trackers | Pendiente | |
 | F7 — recuperación y URLData UDP | Pendiente | |
 | F8 — extensiones y PEX | Pendiente | |
@@ -65,3 +65,13 @@ Self-review: se eliminó el read-back del bitmap después de guardarlo para evit
 Validación: 42 pruebas de aplicación/integración pasan y 1 pública se ignora; 29 pruebas del motor pasan, 3 están ignoradas y 5 E2E se excluyen de esta ejecución (la suite de aplicación ya cubre transferencias loopback). Incluye modificaciones del mismo tamaño, sustitución, truncado, corrupción de la pieza 100, bitmap truncado, salida de proceso sin destructores, recheck manual y fallo inyectado de sync. Prueba de checkpoint: sustitución de longitud, error al publicar, limpieza de temporales y ausencia de flush en Drop. Build TypeScript/Vite y Clippy del motor con `-D warnings` pasan. No se simula una pérdida física de energía; la durabilidad se basa en las barreras del sistema operativo.
 
 Los tres crates vendorizados son miembros del workspace, con la aplicación como miembro predeterminado, para ejecutar sus pruebas explícitamente. El lock incorpora dependencias opcionales/de prueba; no cambia ninguna versión previamente fijada ni activa esas capacidades en el binario de TorrentCat. Los comandos del motor usan `--no-default-features --features rust-tls`.
+
+## F5: subida acotada y cancelable
+
+Cada peer admite 32 solicitudes distintas, con un presupuesto compartido de 1.024 por sesión. Los permisos cubren espera de velocidad, cola y escritura; cancelar no libera capacidad mientras siga existiendo el trabajo. Los duplicados no crean trabajo adicional. Cada writer tiene además 256 mensajes como máximo; desbordarlo devuelve error en vez de crecer indefinidamente. El scheduler de cada torrent reparte un bloque por peer listo y vuelta. No se afirma equidad entre torrents ni una cota sobre el RSS total.
+
+Las conexiones empiezan choked, admiten subida al recibir Interested y vuelven a choked con NotInterested. Cancel y NotInterested descartan solicitudes que todavía no están escribiéndose. Una trama parcialmente escrita se termina para conservar el encuadre del protocolo. Se anuncia `reqq=32`. La ventana de metadata se limita a 64 solicitudes y avanza con las respuestas. Los límites de velocidad inferiores a un bloque permiten una ráfaga inicial de un bloque, manteniendo la tasa configurada después.
+
+Self-review: la prueba de wire descubrió que el handshake entrante consultaba nuestras capacidades y registraba nuestro ID, en lugar del handshake recibido. Se corrigieron ambas referencias. La identidad de cada reserva evita que el Drop de una solicitud cancelada elimine una solicitud nueva del mismo bloque. Mantener el permiso hasta Drop evita que alternar Request/Cancel acumule nodos sin presupuesto. Se corrigió también la capacidad mínima del rate limiter, que antes podía terminar el scheduler con tasas menores que 16 KiB/s.
+
+Validación: 35 pruebas del motor pasan, 3 ignoradas y 5 E2E excluidas; incluye 100.000 solicitudes duplicadas, consumidores lentos, límite global, cancelación/repetición y round robin. Metadata de 32 MiB inicia 64 peticiones y repone una por respuesta. Un peer TCP loopback comprueba bitfield sin Unchoke anticipado, Interested, payload, Cancel/NotInterested durante espera de velocidad y reanudación. Suite de aplicación y Clippy del motor con `-D warnings` pasan. Sin hallazgos bloqueantes restantes en el diff.

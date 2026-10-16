@@ -58,12 +58,33 @@ pub trait PeerConnectionHandler {
 }
 
 #[derive(Debug)]
-pub enum WriterRequest {
+pub(crate) enum WriterRequest {
     Message(Message<'static>),
     UtMetadata(UtMetadata<ByteBufOwned>),
     UtPex(UtPex<ByteBufOwned>),
-    ReadChunkRequest(ChunkInfo),
+    ReadChunkRequest(crate::upload_queue::UploadRequest),
     Disconnect(anyhow::Result<()>),
+}
+
+// A slow peer cannot accumulate an unbounded mix of control and metadata messages.
+#[derive(Clone, Debug)]
+pub(crate) struct WriterSender(tokio::sync::mpsc::Sender<WriterRequest>);
+impl WriterSender {
+    pub fn send(&self, message: WriterRequest) -> anyhow::Result<()> {
+        self.0
+            .try_send(message)
+            .map_err(|_| anyhow::anyhow!("peer writer queue full or closed"))
+    }
+    pub fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
+    pub async fn closed(&self) {
+        self.0.closed().await;
+    }
+}
+pub(crate) fn writer_channel() -> (WriterSender, tokio::sync::mpsc::Receiver<WriterRequest>) {
+    let (tx, rx) = tokio::sync::mpsc::channel(256);
+    (WriterSender(tx), rx)
 }
 
 #[serde_as]
@@ -116,7 +137,7 @@ struct ManagePeerArgs {
     write_buf: Box<[u8; MAX_MSG_LEN]>,
     read: BoxAsyncReadVectored,
     write: BoxAsyncWrite,
-    outgoing_chan: tokio::sync::mpsc::UnboundedReceiver<WriterRequest>,
+    outgoing_chan: tokio::sync::mpsc::Receiver<WriterRequest>,
     have_broadcast: tokio::sync::broadcast::Receiver<ValidPieceIndex>,
 }
 
@@ -145,7 +166,7 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
     // read_buf should start with valuable data. The handshake should be removed from it.
     pub async fn manage_peer_incoming(
         &self,
-        outgoing_chan: tokio::sync::mpsc::UnboundedReceiver<WriterRequest>,
+        outgoing_chan: tokio::sync::mpsc::Receiver<WriterRequest>,
         mut incoming: CheckedIncomingConnection,
         have_broadcast: tokio::sync::broadcast::Receiver<ValidPieceIndex>,
     ) -> Result<()> {
@@ -182,10 +203,10 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
         )
         .await?;
 
-        let handshake_supports_extended = handshake.supports_extended();
+        let handshake_supports_extended = incoming.handshake.supports_extended();
 
         self.handler
-            .on_handshake(handshake, incoming.kind)
+            .on_handshake(incoming.handshake, incoming.kind)
             .map_err(Error::Anyhow)?;
 
         self.manage_peer(ManagePeerArgs {
@@ -202,7 +223,7 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
 
     pub async fn manage_peer_outgoing(
         &self,
-        outgoing_chan: tokio::sync::mpsc::UnboundedReceiver<WriterRequest>,
+        outgoing_chan: tokio::sync::mpsc::Receiver<WriterRequest>,
         have_broadcast: tokio::sync::broadcast::Receiver<ValidPieceIndex>,
     ) -> Result<()> {
         use tokio::io::AsyncWriteExt;
@@ -332,15 +353,7 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
                 trace!("sent bitfield");
             }
 
-            let len = Message::Unchoke.serialize(&mut *write_buf, &Default::default)?;
-            with_timeout(
-                "writing",
-                rwtimeout,
-                write.write_all(&write_buf[..len]).map_err(Error::Write),
-            )
-            .await?;
-            trace!("sent unchoke");
-
+            // Connections start choked. The live handler admits interested peers.
             let mut broadcast_closed = false;
 
             loop {
@@ -374,6 +387,7 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
                 tokio::task::yield_now().await;
 
                 let mut uploaded_add = None;
+                let mut upload_guard = None;
 
                 trace!("about to send: {:?}", &req);
                 let ext_msg_ids = &|| {
@@ -394,7 +408,11 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
                         Message::Extended(ExtendedMessage::UtPex(ut_pex.as_borrowed()))
                             .serialize(&mut *write_buf, ext_msg_ids)?
                     }
-                    WriterRequest::ReadChunkRequest(chunk) => {
+                    WriterRequest::ReadChunkRequest(request) => {
+                        if request.cancel.is_cancelled() {
+                            continue;
+                        }
+                        let chunk = request.chunk;
                         #[allow(unused_mut)]
                         let mut skip_reading_for_e2e_tests = false;
 
@@ -439,7 +457,11 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
                                 .map_err(Error::ReadChunk)?;
                         }
 
+                        if request.cancel.is_cancelled() {
+                            continue;
+                        }
                         uploaded_add = Some(chunk.size);
+                        upload_guard = Some(request);
                         full_len
                     }
                     WriterRequest::Disconnect(res) => {
@@ -461,6 +483,7 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
                 if let Some(uploaded_add) = uploaded_add {
                     self.handler.on_uploaded_bytes(uploaded_add)
                 }
+                drop(upload_guard);
             }
 
             // For type inference.
