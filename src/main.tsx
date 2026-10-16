@@ -16,6 +16,7 @@ import {
   playable,
   isVideo,
 } from "./types";
+import { VlcRecommendation } from "./vlc-recommendation";
 import { Player } from "./player";
 import "./style.css";
 import { playSound } from "./sound";
@@ -39,6 +40,12 @@ function App() {
     [remove, setRemove] = useState<Torrent | null>(null),
     [deleteData, setDeleteData] = useState(false);
   const [posters, setPosters] = useState<Record<string, string>>({});
+  const [completion, setCompletion] = useState<{ name: string } | null>(null);
+  useEffect(() => {
+    if (!completion) return;
+    const timer = window.setTimeout(() => setCompletion(null), 2500);
+    return () => window.clearTimeout(timer);
+  }, [completion]);
   const postersRequested = useRef(new Set<string>());
   const current = useRef({ data, page, playing });
   current.current = { data, page, playing };
@@ -128,7 +135,7 @@ function App() {
     const cleanups: Promise<() => void>[] = [];
     cleanups.push(
       listen<string>("download-complete", ({ payload }) => {
-        setNotice(`Download complete: ${payload}`);
+        setCompletion({ name: payload });
         if (!current.current.playing) chime("done");
       }),
     );
@@ -282,6 +289,15 @@ function App() {
           {busy}
         </div>
       )}
+      {completion && (
+        <div className="completion-toast" role="status">
+          <Icon name="check_circle" />
+          <div><strong>Download complete</strong><span>{completion.name}</span></div>
+          <button aria-label="Dismiss download notification" onClick={() => setCompletion(null)}>
+            <Icon name="close" />
+          </button>
+        </div>
+      )}
       <main className="content">
         {!data ? (
           <div className="shelf-empty">
@@ -306,6 +322,7 @@ function App() {
                 Add torrent
               </Button>
             </div>
+            {!data.tools.vlc && <VlcRecommendation report={report} />}
             <div className="shelf-toolbar">
               <div
                 className="shelf-filters"

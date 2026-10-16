@@ -37,6 +37,7 @@ sha2 = "0.10"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
 objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow"] }
@@ -48,4 +49,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 [profile.release]
 lto = "thin"
 codegen-units = 1
-strip = true
+# Cargo's strip, combined with the explicit MACOSX_DEPLOYMENT_TARGET that
+# `tauri build` sets, produces Mach-O files (proc macros and the app itself)
+# that dyld rejects with "mis-aligned LINKEDIT string pool".
+strip = false

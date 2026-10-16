@@ -6038,6 +6038,7 @@ dependencies = [
  "encoding_rs",
  "futures-core",
  "lava_torrent",
+ "libc",
  "libloading 0.9.0",
  "librqbit",
  "notify",

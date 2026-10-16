@@ -30,7 +30,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             download_path: home().join("Downloads").to_string_lossy().into(),
-            video_engine: "builtin".into(),
+            video_engine: "vlc".into(),
             external_player_path: "/Applications/VLC.app".into(),
             sound_notifications: true,
             completion_notifications: false,

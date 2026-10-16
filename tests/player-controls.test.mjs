@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { shouldHideControls, CONTROL_IDLE_MS } from "../src/player-controls.ts";
+import { shouldHideControls, CONTROL_IDLE_MS, resolvePlaybackEngine } from "../src/player-controls.ts";
 
 const playing = {
   fullscreen: true, paused: false, blocked: false, hovered: false,
@@ -22,3 +22,15 @@ for (const reason of ["paused", "blocked", "hovered", "focused", "dragging"]) {
     assert.equal(shouldHideControls({ ...playing, now: 9000, [reason]: true }), false);
   });
 }
+
+test("VLC preference falls back when unavailable and resumes when installed", () => {
+  assert.equal(resolvePlaybackEngine("vlc", false), "builtin");
+  assert.equal(resolvePlaybackEngine("vlc", true), "vlc");
+});
+
+test("explicit built-in and external player choices are preserved", () => {
+  for (const available of [true, false]) {
+    assert.equal(resolvePlaybackEngine("builtin", available), "builtin");
+    assert.equal(resolvePlaybackEngine("external", available), "external");
+  }
+});

@@ -1045,6 +1045,8 @@ select {
   background: #080a0c;
 }
 .player-toolbar {
+  background: #17191d;
+  border-bottom: 1px solid #343b44;
   height: 46px;
   flex-shrink: 0;
   display: flex;
@@ -1094,12 +1096,12 @@ html.native-playback,
 .player-fullscreen .player-toolbar {
   top: 0;
   height: 64px;
-  background: linear-gradient(#080a0ce6, #080a0c00);
+  background: #17191d;
 }
 .player-fullscreen .player-bottom {
   bottom: 0;
   padding-top: 30px;
-  background: linear-gradient(#080a0c00, #080a0cf5);
+  background: #17191d;
 }
 .player-fullscreen .controls-hidden .player-toolbar,
 .player-fullscreen .controls-hidden .player-bottom {
@@ -1150,7 +1152,7 @@ html.native-playback,
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
-.seek-row > input {
+.playback-timeline {
   flex: 1;
   min-width: 0;
 }
@@ -1193,26 +1195,28 @@ html.native-playback,
 .player-message.has-error {
   color: #ffb3aa;
 }
-.download-strip {
+/* Download progress sits just below the seek control without taking a row. */
+.playback-timeline {
   display: flex;
-  align-items: center;
-  gap: 14px;
-  color: #a7b0bd;
-  font-size: 11px;
-  margin-top: 12px;
+  flex-direction: column;
+  gap: 3px;
 }
-.download-strip progress {
-  flex: 1;
-  height: 3px;
+.playback-timeline > input {
+  width: 100%;
+  margin: 0;
+}
+.download-progress {
+  width: 100%;
+  height: 2px;
   appearance: none;
   border: 0;
+  border-radius: 2px;
+  overflow: hidden;
+  opacity: .65;
 }
-.download-strip progress::-webkit-progress-bar {
-  background: #343b44;
-}
-.download-strip progress::-webkit-progress-value {
-  background: #71d5e6;
-}
+.download-progress::-webkit-progress-bar { background: #343b44; }
+.download-progress::-webkit-progress-value { background: #71d5e6; }
+.download-progress::-moz-progress-bar { background: #71d5e6; }
 input[type="range"] {
   accent-color: #71d5e6;
   height: 14px;
@@ -1236,4 +1240,138 @@ input[type="range"] {
   .preferences-page {
     padding: 20px;
   }
+}
+
+/* A quiet, transient completion toast never shifts the video surface. */
+.completion-toast {
+  position: absolute;
+  z-index: 35;
+  top: 58px;
+  right: 18px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: max-content;
+  max-width: min(420px, calc(100% - 36px));
+  padding: 13px 14px;
+  border: 1px solid #71d5e630;
+  border-radius: 14px;
+  background: #202b2f;
+  box-shadow: 0 8px 30px #0005;
+  color: #edf0f4;
+}
+.completion-toast > .icon { color: #71d5e6; }
+.completion-toast > div { min-width: 0; }
+.completion-toast strong { display: block; font-size: 12px; font-weight: 600; }
+.completion-toast span {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: #a7b0bd;
+  font-size: 11px;
+}
+.completion-toast button { border: 0; background: none; color: #a7b0bd; padding: 4px; }
+.completion-toast button .icon { font-size: 18px; }
+.player-fullscreen .completion-toast { top: 16px; }
+.audio-track-control { position: relative; flex-shrink: 0; }
+.audio-track-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid #ffffff14;
+  border-radius: 10px;
+  background: #ffffff07;
+  color: #dbe2ea;
+  font-size: 12px;
+  transition: background .15s, border-color .15s;
+}
+.audio-track-trigger > .icon { font-size: 18px; }
+.audio-track-trigger > .icon:last-child { font-size: 16px; color: #8995a5; }
+.audio-track-trigger:hover, .audio-track-trigger[aria-expanded="true"] {
+  background: #71d5e610;
+  border-color: #71d5e645;
+  color: #a4e6f0;
+}
+.audio-track-trigger:focus-visible, .audio-track-menu button:focus-visible {
+  outline: 2px solid #71d5e6;
+  outline-offset: 2px;
+}
+.audio-track-trigger .spinner { width: 16px; height: 16px; }
+.audio-track-menu {
+  position: absolute;
+  bottom: calc(100% + 12px);
+  right: 0;
+  z-index: 5;
+  width: 284px;
+  max-width: calc(100vw - 40px);
+  max-height: min(320px, 50vh);
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid #ffffff1a;
+  border-radius: 16px;
+  background: #20252c;
+  box-shadow: 0 16px 48px #0008, 0 2px 8px #0004;
+}
+.audio-track-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px 10px 12px;
+  color: #9ba8b9;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .4px;
+}
+.audio-track-heading > span:last-child {
+  background: #ffffff0a;
+  border-radius: 6px;
+  padding: 1px 6px;
+  font-variant-numeric: tabular-nums;
+}
+.audio-track-menu button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #e4eaf2;
+  text-align: left;
+}
+.audio-track-menu button + button { margin-top: 3px; }
+.audio-track-menu button:hover { background: #ffffff09; }
+.audio-track-menu button[aria-checked="true"] { background: #71d5e612; }
+.audio-track-menu button > .icon { color: #71d5e6; font-size: 18px; }
+.audio-track-copy { min-width: 0; }
+.audio-track-copy strong { display: block; font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.audio-track-copy small { display: block; color: #96a4b6; font-size: 11px; margin-top: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .audio-track-trigger { transition: none; }
+}
+
+.track-menu-footer { border-top: 1px solid #ffffff12; margin-top: 8px; padding-top: 6px; }
+.track-menu-footer button { justify-content: flex-start; gap: 8px; font-size: 12px; }
+.vlc-recommendation {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  margin-bottom: 20px;
+  border: 1px solid #71d5e633;
+  border-radius: 12px;
+  background: #202a30;
+}
+.vlc-recommendation > .icon { color: #71d5e6; font-size: 28px; }
+.vlc-recommendation > div { flex: 1; min-width: 0; }
+.vlc-recommendation strong { font-size: 13px; }
+.vlc-recommendation p { margin: 4px 0 0; color: #a7b0bd; font-size: 12px; }
+.preference .vlc-recommendation { margin: 14px 0 0; }
+@media (max-width: 800px) {
+  .vlc-recommendation { flex-wrap: wrap; }
 }

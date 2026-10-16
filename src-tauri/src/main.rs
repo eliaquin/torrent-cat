@@ -218,6 +218,18 @@ async fn external_player(s: tauri::State<'_, AppState>, url: String) -> Cmd<()> 
     }
     Ok(())
 }
+#[tauri::command]
+async fn open_vlc_download() -> Cmd<()> {
+    let result = tokio::process::Command::new("/usr/bin/open")
+        .arg("https://www.videolan.org/vlc/download-macosx.html")
+        .status()
+        .await
+        .map_err(err)?;
+    if !result.success() {
+        return Err("Could not open the VLC download page".into());
+    }
+    Ok(())
+}
 async fn on_main<F>(window: tauri::WebviewWindow, action: F) -> Cmd<Value>
 where
     F: FnOnce(usize) -> anyhow::Result<Value> + Send + 'static,
@@ -351,6 +363,21 @@ fn menus(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 fn main() {
+    // Finder launches with a small descriptor budget shared by torrent sockets
+    // and VLC. Raise this process's soft limit without changing the hard limit.
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let mut limit = std::mem::zeroed::<libc::rlimit>();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 {
+            let requested = limit.rlim_max.min(4096);
+            if limit.rlim_cur < requested {
+                limit.rlim_cur = requested;
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                    eprintln!("Unable to increase open-file limit: {}", std::io::Error::last_os_error());
+                }
+            }
+        }
+    }
     // libVLC discovers its codecs through this path. Set it before Tauri/Tokio
     // start worker threads; mutating the process environment later is unsafe.
     unsafe {
@@ -431,6 +458,7 @@ fn main() {
             reveal_torrent,
             export_torrent,
             external_player,
+            open_vlc_download,
             native_open,
             native_subtitle,
             native_close,

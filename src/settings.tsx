@@ -7,6 +7,7 @@ import {
   requestPermission,
 } from "@tauri-apps/plugin-notification";
 import { Snapshot, Preferences } from "./types";
+import { VlcRecommendation } from "./vlc-recommendation";
 import { Button, Icon } from "./ui";
 export function Settings({
   data,
@@ -148,19 +149,19 @@ export function Settings({
                     })
                   }
                 >
+                  <option value="vlc">VLC (recommended)</option>
                   <option value="builtin">Built-in player</option>
-                  <option value="vlc" disabled={!data.tools.vlc}>
-                    Native VLC
-                  </option>
                   <option value="external">External player</option>
                 </select>
               </label>
               <p>
+                Used for the next file you open.{" "}
                 {data.tools.vlc
-                  ? "VLC is installed. Native playback supports additional video formats."
-                  : "Install VLC 3 in Applications to enable native playback."}
+                  ? "VLC is ready. If it becomes unavailable, TorrentCat uses the built-in player."
+                  : "VLC is not installed. TorrentCat uses the built-in player until VLC is available."}
               </p>
             </div>
+            {!data.tools.vlc && <div className="preference"><VlcRecommendation report={report} /></div>}
             <div className="preference">
               <strong>External player</strong>
               <div className="path-selector-controls">

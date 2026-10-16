@@ -7,7 +7,7 @@ A macOS app for downloading and streaming torrents, built with Tauri, Rust, Reac
 - Open torrent files, magnet links, info hashes and torrent URLs.
 - Download, seed, pause, resume and select individual files.
 - Play media while it downloads, with seeking, subtitles and saved playback positions.
-- Use built-in playback, embedded VLC 3 or an external player.
+- Use embedded VLC 3 by default, with built-in playback when VLC is unavailable. Choose a different player in Preferences.
 - Create torrents from a file or folder, including private torrents.
 - Configure watch folders, streaming priority, launch at login and completion notifications.
 

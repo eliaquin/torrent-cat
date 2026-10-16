@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Playing, Snapshot, clock, bytes } from "./types";
 import { Button, Icon } from "./ui";
+import { resolvePlaybackEngine } from "./player-controls";
+import { TrackMenu } from "./track-menu";
 import { usePlayerPresentation } from "./use-player-presentation";
 type Track = { id: number; name: string };
 type NativeStatus = {
@@ -20,6 +22,8 @@ type Probe = {
     codec_type: string;
     codec_name: string;
     tags?: { language?: string; title?: string };
+    disposition?: { default?: number };
+    channels?: number;
   }[];
   format?: { tags?: Record<string, string> };
 };
@@ -37,7 +41,7 @@ export function Player({
   onBack: () => void;
 }) {
   const [url, setUrl] = useState(""),
-    [engine, setEngine] = useState(data.profile.prefs.videoEngine),
+    [engine, setEngine] = useState(() => resolvePlaybackEngine(data.profile.prefs.videoEngine, data.tools.vlc)),
     [message, setMessage] = useState("Preparing stream…"),
     [failed, setFailed] = useState(false),
     [paused, setPaused] = useState(false),
@@ -48,9 +52,15 @@ export function Player({
     [subtitle, setSubtitle] = useState(""),
     [probe, setProbe] = useState<Probe>({}),
     [native, setNative] = useState<NativeStatus | null>(null),
-    [working, setWorking] = useState(false);
+    [working, setWorking] = useState(false),
+    [audioTrack, setAudioTrack] = useState<number | null>(null),
+    [audioMenuOpen, setAudioMenuOpen] = useState(false),
+    [subtitleMenuOpen, setSubtitleMenuOpen] = useState(false),
+    [subtitleTrack, setSubtitleTrack] = useState(-1),
+    [subtitleFile, setSubtitleFile] = useState<{ url: string; name: string } | null>(null),
+    [subtitleWorking, setSubtitleWorking] = useState(false);
   const presentation = usePlayerPresentation(
-    paused, !!message || working || !url || engine === "external",
+    paused, !!message || working || !url || engine === "external" || audioMenuOpen || subtitleMenuOpen || subtitleWorking,
     engine === "vlc" && !!url && native !== null && !failed, report,
   );
   const video = useRef<HTMLVideoElement>(null),
@@ -60,7 +70,8 @@ export function Player({
     position = useRef(0),
     lastSaved = useRef(0),
     ended = useRef(false),
-    nativeReady = useRef(false);
+    nativeReady = useRef(false),
+    subtitleRequest = useRef(0);
   const torrent = data.torrents.find((t) => t.id === playing.id);
   const file = torrent?.files?.[playing.index];
   const complete =
@@ -95,8 +106,14 @@ export function Player({
     nativeReady.current = false;
     setUrl("");
     setProbe({});
+    setAudioTrack(null);
+    setWorking(false);
     setNative(null);
     setSubtitle("");
+    setSubtitleTrack(-1);
+    setSubtitleFile(null);
+    setSubtitleWorking(false);
+    subtitleRequest.current++;
     setMessage("Preparing stream…");
     setFailed(false);
     setPaused(false);
@@ -237,7 +254,12 @@ export function Player({
       } else void control("pause", paused ? 0 : 1);
       setPaused(!paused);
     } else if (video.current) {
-      if (video.current.paused) void video.current.play().catch(report);
+      // A pending play() rejects with AbortError when a pause, reload or
+      // unmount supersedes it; that is expected, not a playback failure.
+      if (video.current.paused)
+        void video.current.play().catch((e) => {
+          if (!(e instanceof DOMException && e.name === "AbortError")) report(e);
+        });
       else video.current.pause();
     }
   };
@@ -298,6 +320,7 @@ export function Player({
       });
       if (gen === generation.current) {
         setUrl(next);
+        if (audio !== undefined) setAudioTrack(audio);
         setMessage("");
         setFailed(false);
       }
@@ -321,13 +344,42 @@ export function Player({
         if (gen === generation.current) {
           if (engine === "vlc") {
             await invoke("native_subtitle", { url: next });
-          } else setSubtitle(next);
+          } else {
+            subtitleRequest.current++;
+            setSubtitleFile({ url: next, name: path.split("/").pop() || "Subtitle file" });
+            setSubtitle(next);
+            setSubtitleTrack(-2);
+          }
         }
       }
     } catch (e) {
       report(e);
     }
   };
+  const selectSubtitle = async (id: number) => {
+    const request = ++subtitleRequest.current;
+    if (id < 0) {
+      setSubtitle(id === -2 ? subtitleFile?.url || "" : "");
+      setSubtitleTrack(id);
+      return;
+    }
+    const gen = generation.current;
+    setSubtitleWorking(true);
+    try {
+      const next = await invoke<string>("subtitle_embedded", {
+        id: playing.id, index: playing.index, stream: id,
+      });
+      if (gen === generation.current && request === subtitleRequest.current) {
+        setSubtitle(next);
+        setSubtitleTrack(id);
+      }
+    } catch (error) {
+      if (gen === generation.current && request === subtitleRequest.current) report(error);
+    } finally {
+      if (gen === generation.current && request === subtitleRequest.current) setSubtitleWorking(false);
+    }
+  };
+  const audioStreams = probe.streams?.filter((stream) => stream.codec_type === "audio") || [];
   return (
     <section
       className={`player-page${presentation.hidden ? " controls-hidden" : ""}`}
@@ -340,21 +392,6 @@ export function Player({
         <span className="player-filename" title={playing.name}>
           {playing.name.split("/").pop()}
         </span>
-        <select
-          aria-label="Playback engine"
-          value={engine}
-          onChange={(e) => {
-            setEngine(e.target.value as typeof engine);
-            setFailed(false);
-            setMessage("");
-          }}
-        >
-          <option value="builtin">Built-in player</option>
-          <option value="vlc" disabled={!data.tools.vlc}>
-            Native VLC
-          </option>
-          <option value="external">External player</option>
-        </select>
       </div>
       <div
         className="video-surface" ref={surface} tabIndex={0}
@@ -448,18 +485,27 @@ export function Player({
         )}
         <div className="seek-row">
           <span>{clock(time)}</span>
-          <input
-            type="range"
-            aria-label="Playback position"
-            min={0}
-            max={Number.isFinite(duration) && duration > 0 ? duration : 1}
-            step="0.1"
-            value={Math.min(
-              time,
-              Number.isFinite(duration) && duration > 0 ? duration : 1,
-            )}
-            onChange={(e) => seek(Number(e.target.value))}
-          />
+          <div className="playback-timeline">
+            <input
+              type="range"
+              aria-label="Playback position"
+              min={0}
+              max={Number.isFinite(duration) && duration > 0 ? duration : 1}
+              step="0.1"
+              value={Math.min(
+                time,
+                Number.isFinite(duration) && duration > 0 ? duration : 1,
+              )}
+              onChange={(e) => seek(Number(e.target.value))}
+            />
+            <progress
+              className="download-progress"
+              aria-label="Download progress"
+              title={`${bytes(torrent?.stats?.progress_bytes || 0)} of ${bytes(torrent?.stats?.total_bytes || 0)} downloaded`}
+              max={torrent?.stats?.total_bytes || 1}
+              value={torrent?.stats?.progress_bytes || 0}
+            />
+          </div>
           <span>{clock(duration)}</span>
         </div>
         <div className="player-controls">
@@ -514,104 +560,67 @@ export function Player({
           </select>
           <div className="player-spacer" />
           {engine === "vlc" && native?.audio.length ? (
-            <select
-              aria-label="Audio track"
-              value={native.audioTrack}
-              onChange={(e) => void control("audio", Number(e.target.value))}
-            >
-              {!native.audio.some((track) => track.id === native.audioTrack) && (
-                <option value={native.audioTrack}>
-                  {native.audioTrack === -1 ? "Off" : `Track ${native.audioTrack}`}
-                </option>
-              )}
-              {native.audio.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.id === -1 ? "Off" : t.name || `Track ${t.id}`}
-                </option>
-              ))}
-            </select>
+            <TrackMenu
+              label="Audio" icon="headset"
+              key={`vlc:${playing.hash}:${playing.index}`}
+              tracks={native.audio.map((track) => ({ ...track, name: track.id === -1 ? "Off" : track.name || `Track ${track.id}` }))}
+              selected={native.audioTrack}
+              onOpenChange={setAudioMenuOpen}
+              onSelect={(id) => void control("audio", id)}
+            />
           ) : null}
-          {engine === "builtin" &&
-          complete &&
-          probe.streams?.some((s) => s.codec_type === "audio") ? (
-            <select
-              aria-label="Prepare audio track"
-              defaultValue=""
+          {engine === "builtin" && complete && data.tools.ffmpeg && audioStreams.length > 0 ? (
+            <TrackMenu
+              label="Audio" icon="headset"
+              key={`builtin:${playing.hash}:${playing.index}`}
+              tracks={audioStreams.map((track, index) => ({
+                id: track.index,
+                name: track.tags?.title || audioLanguage(track.tags?.language) || `Track ${index + 1}`,
+                detail: [track.tags?.title ? audioLanguage(track.tags?.language) : "",
+                  track.codec_name.toUpperCase(), track.channels === 1 ? "Mono" : track.channels === 2 ? "Stereo" : track.channels ? `${track.channels} channels` : ""].filter(Boolean).join(" · "),
+              }))}
+              selected={audioTrack ?? audioStreams.find((track) => track.disposition?.default)?.index ?? audioStreams[0].index}
               disabled={working}
-              onChange={(e) => void convert(Number(e.target.value))}
-            >
-              <option value="" disabled>
-                Audio track…
-              </option>
-              {probe.streams
-                .filter((s) => s.codec_type === "audio")
-                .map((t) => (
-                  <option key={t.index} value={t.index}>
-                    {t.tags?.title || t.tags?.language || `Track ${t.index}`} (
-                    {t.codec_name})
-                  </option>
-                ))}
-            </select>
+              onOpenChange={setAudioMenuOpen}
+              onSelect={(id) => void convert(id)}
+            />
           ) : null}
-          {engine === "vlc" && native?.subtitles.length ? (
-            <select
-              aria-label="Subtitle track"
-              value={native.subtitleTrack}
-              onChange={(e) => void control("subtitle", Number(e.target.value))}
-            >
-              {!native.subtitles.some((track) => track.id === native.subtitleTrack) && (
-                <option value={native.subtitleTrack}>
-                  {native.subtitleTrack === -1 ? "Off" : `Track ${native.subtitleTrack}`}
-                </option>
-              )}
-              {native.subtitles.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.id === -1 ? "Off" : t.name || `Track ${t.id}`}
-                </option>
-              ))}
-            </select>
-          ) : null}
-          {engine === "builtin" &&
-          probe.streams?.some((s) => s.codec_type === "subtitle") ? (
-            <select
-              aria-label="Embedded subtitles"
-              defaultValue=""
-              onChange={async (e) => {
-                if (e.target.value === "off") {
-                  setSubtitle("");
-                  return;
-                }
-                const gen = generation.current;
-                try {
-                  const u = await invoke<string>("subtitle_embedded", {
-                    id: playing.id,
-                    index: playing.index,
-                    stream: Number(e.target.value),
-                  });
-                  if (gen === generation.current) setSubtitle(u);
-                } catch (error) {
-                  report(error);
-                }
-              }}
-            >
-              <option value="" disabled>
-                Subtitles
-              </option>
-              <option value="off">Off</option>
-              {probe.streams
-                .filter((s) => s.codec_type === "subtitle")
-                .map((t) => (
-                  <option key={t.index} value={t.index}>
-                    {t.tags?.title || t.tags?.language || `Track ${t.index}`}
-                  </option>
-                ))}
-            </select>
-          ) : null}
-          <Button
-            icon="subtitles"
-            title="Add subtitle file"
-            onClick={() => void addSub()}
-          />
+          {engine === "vlc" && (
+            <TrackMenu
+              key={`subtitles:vlc:${playing.hash}:${playing.index}`}
+              label="Subtitles" icon="subtitles"
+              tracks={[
+                { id: -1, name: "Off" },
+                ...(native?.subtitles || []).filter((track) => track.id !== -1).map((track) => ({
+                  ...track, name: track.name || `Track ${track.id}`,
+                })),
+              ]}
+              selected={native?.subtitleTrack ?? -1}
+              onOpenChange={setSubtitleMenuOpen}
+              onSelect={(id) => void control("subtitle", id)}
+              onAddFile={() => void addSub()}
+            />
+          )}
+          {engine === "builtin" && (
+            <TrackMenu
+              key={`subtitles:builtin:${playing.hash}:${playing.index}`}
+              label="Subtitles" icon="subtitles"
+              tracks={[
+                { id: -1, name: "Off" },
+                ...(subtitleFile ? [{ id: -2, name: subtitleFile.name, detail: "Subtitle file" }] : []),
+                ...(probe.streams || []).filter((stream) => stream.codec_type === "subtitle").map((track, index) => ({
+                  id: track.index,
+                  name: track.tags?.title || audioLanguage(track.tags?.language) || `Track ${index + 1}`,
+                  detail: track.codec_name.toUpperCase(),
+                })),
+              ]}
+              selected={subtitleTrack}
+              disabled={subtitleWorking}
+              onOpenChange={setSubtitleMenuOpen}
+              onSelect={(id) => void selectSubtitle(id)}
+              onAddFile={() => void addSub()}
+            />
+          )}
           <Button
             icon={presentation.fullscreen ? "fullscreen_exit" : "fullscreen"}
             title={presentation.fullscreen ? "Exit full screen" : "Full screen"}
@@ -619,18 +628,13 @@ export function Player({
             onClick={() => void presentation.changeFullscreen()}
           />
         </div>
-        <div className="download-strip">
-          <span>
-            {torrent?.stats?.finished
-              ? "Download complete"
-              : `${bytes(torrent?.stats?.progress_bytes || 0)} of ${bytes(torrent?.stats?.total_bytes || 0)} downloaded`}
-          </span>
-          <progress
-            max={torrent?.stats?.total_bytes || 1}
-            value={torrent?.stats?.progress_bytes || 0}
-          />
-        </div>
       </div>
     </section>
   );
+}
+
+function audioLanguage(code?: string) {
+  if (!code || code === "und") return "";
+  try { return new Intl.DisplayNames([navigator.language], { type: "language" }).of(code) || code; }
+  catch { return code; }
 }
