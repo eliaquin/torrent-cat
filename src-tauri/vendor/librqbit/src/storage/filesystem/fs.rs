@@ -86,6 +86,15 @@ impl FilesystemStorage {
 }
 
 impl TorrentStorage for FilesystemStorage {
+    fn sync_all(&self) -> anyhow::Result<()> {
+        for file in &self.opened_files {
+            if !file.is_dummy() {
+                file.lock_read()?.sync_all()?;
+            }
+        }
+        Ok(())
+    }
+
     fn pread_exact(&self, file_id: usize, offset: u64, buf: &mut [u8]) -> anyhow::Result<()> {
         self.opened_files
             .get(file_id)
@@ -156,6 +165,24 @@ impl TorrentStorage for FilesystemStorage {
         shared: &ManagedTorrentShared,
         metadata: &TorrentMetadata,
     ) -> anyhow::Result<()> {
+        self.init_files(metadata, shared.options.allow_overwrite)
+    }
+
+    fn refresh(
+        &mut self,
+        _shared: &ManagedTorrentShared,
+        metadata: &TorrentMetadata,
+    ) -> anyhow::Result<()> {
+        self.init_files(metadata, true)
+    }
+}
+
+impl FilesystemStorage {
+    fn init_files(
+        &mut self,
+        metadata: &TorrentMetadata,
+        allow_overwrite: bool,
+    ) -> anyhow::Result<()> {
         let mut files = Vec::<OpenedFile>::new();
         for file_details in metadata.file_infos.iter() {
             let mut full_path = self.output_folder.clone();
@@ -172,7 +199,7 @@ impl TorrentStorage for FilesystemStorage {
             }
             let mut options = OpenOptions::new();
             options.read(true).write(true);
-            if shared.options.allow_overwrite {
+            if allow_overwrite {
                 options.create(true);
             } else {
                 options.create_new(true);

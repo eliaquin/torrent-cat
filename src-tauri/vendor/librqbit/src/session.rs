@@ -438,7 +438,7 @@ pub struct SessionOptions {
     /// Disable tracker communication
     pub disable_trackers: bool,
 
-    /// Enable fastresume, to restore state quickly after restart.
+    /// Persist piece checkpoints. TorrentCat still verifies all disk pieces on restart.
     pub fastresume: bool,
 
     /// Turn on to dump session contents into a file periodically, so that on next start
@@ -1177,10 +1177,10 @@ impl Session {
                             }
                         })
                         .collect::<Vec<_>>();
-                    if !torrent.meta.info.data.private {
-                        if let Some(custom_trackers) = opts.trackers.clone() {
-                            trackers.extend(custom_trackers);
-                        }
+                    if !torrent.meta.info.data.private
+                        && let Some(custom_trackers) = opts.trackers.clone()
+                    {
+                        trackers.extend(custom_trackers);
                     }
 
                     InternalAddResult {
@@ -1449,7 +1449,6 @@ impl Session {
                 only_files.clone(),
                 self.spawner
                     .block_in_place(|| minfo.storage_factory.create_and_init(&minfo, &metadata))?,
-                false,
             ));
             let handle = Arc::new(ManagedTorrent {
                 locked: RwLock::new(ManagedTorrentLocked {
@@ -1599,7 +1598,7 @@ impl Session {
         let is_private = t.with_metadata(|m| m.info.info().private).unwrap_or(true);
         self.make_peer_rx(
             t.info_hash(),
-            t.shared().trackers.iter().cloned().collect(),
+            t.shared().trackers.to_vec(),
             announce,
             t.shared().options.force_tracker_interval,
             t.shared().options.initial_peers.clone(),
@@ -1704,6 +1703,21 @@ impl Session {
         let _lifecycle = self.lifecycle.lock().await;
         handle.pause()?;
         self.wait_for_tracker_stop(handle.info_hash()).await?;
+        self.try_update_persistence_metadata(handle).await;
+        Ok(())
+    }
+
+    /// Verify all current disk files; remains paused and performs no discovery.
+    pub async fn recheck(&self, handle: &ManagedTorrentHandle) -> anyhow::Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        if self.closing.is_cancelled() {
+            bail!("session is stopping");
+        }
+        if !handle.with_state(|s| matches!(s, ManagedTorrentState::Paused(_))) {
+            bail!("pause the torrent before verifying files");
+        }
+        self.wait_for_tracker_stop(handle.info_hash()).await?;
+        handle.recheck()?;
         self.try_update_persistence_metadata(handle).await;
         Ok(())
     }

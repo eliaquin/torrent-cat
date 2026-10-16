@@ -342,6 +342,30 @@ impl ManagedTorrent {
         g.state = ManagedTorrentState::Error(error)
     }
 
+    /// Start a fresh verification while retaining ID, counters and file selection.
+    pub(crate) fn recheck(self: &Arc<Self>) -> anyhow::Result<()> {
+        let metadata = self.with_metadata(Arc::clone)?;
+        let mut g = self.locked.write();
+        let ManagedTorrentState::Paused(paused) = &mut g.state else {
+            bail!("pause the torrent before verifying files");
+        };
+        // Reopen through the existing confined root so replaced files, not old
+        // open inodes, are checked. On failure the previous paused state survives.
+        paused.files.refresh(&self.shared, &metadata)?;
+        let files = paused.files.take()?;
+        g.paused = true;
+        g.state = ManagedTorrentState::Initializing(Arc::new(TorrentStateInitializing::new(
+            self.shared.clone(),
+            metadata,
+            g.only_files.clone(),
+            files,
+        )));
+        self.shared.tracker_have.store(0, Ordering::Relaxed);
+        self.state_change_notify.notify_waiters();
+        drop(g);
+        self.start(None, true)
+    }
+
     /// peer_rx: the peer stream. If start_paused=false, must be set.
     /// start_paused: if set, the torrent will initialize (check file integrity), but will not start
     pub(crate) fn start(
@@ -446,7 +470,6 @@ impl ManagedTorrent {
                         t.shared
                             .storage_factory
                             .create_and_init(t.shared(), &metadata)?,
-                        true,
                     ));
                     g.state = ManagedTorrentState::Initializing(initializing.clone());
                     t.state_change_notify.notify_waiters();

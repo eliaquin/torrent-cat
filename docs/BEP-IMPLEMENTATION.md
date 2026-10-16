@@ -8,8 +8,8 @@ Las referencias de líneas de la auditoría describen el commit base, no el cód
 | --- | --- | --- |
 | F1 — aislamiento de archivos | Integrado en `df35676` y publicado; 35 pruebas pasan, 1 ignorada | `tests/storage_confinement.rs` |
 | F2 — asociación de respuestas UDP | Integrado en `eb6252f` y publicado | Pruebas UDP del crate y `tracker_tests` |
-| F3 — límites de entradas | Implementado, revisado y validado | Parser, cuerpos HTTP, URL y tracker locales |
-| F4 — integridad y durabilidad de reanudación | Pendiente | |
+| F3 — límites de entradas | Integrado en `4c970bd` y publicado | Parser, cuerpos HTTP, URL y tracker locales |
+| F4 — integridad y durabilidad de reanudación | Implementado, revisado y validado | Hash completo, checkpoints y recheck manual |
 | F5 — capacidad, cancelación y equidad de subida | Pendiente | |
 | F6 — niveles y failover de trackers | Pendiente | |
 | F7 — recuperación y URLData UDP | Pendiente | |
@@ -51,3 +51,17 @@ El tracker admite cuerpos HTTP de hasta 1 MiB, 2.000 peers por respuesta y un ID
 Self-review: además de las rutas de red, la lectura de `Core::add` comprobaba tamaño y luego leía sin límite, con una carrera si el archivo crecía. Ahora la lectura también queda acotada. Se conserva la compatibilidad de bencode con datos binarios tras un encabezado mediante `from_bytes_with_rest`, pero HTTP exige consumir toda la respuesta. La validación de intervalos ocurre antes de dar por exitoso el anuncio; una prueba recupera un tracker que primero devuelve `u64::MAX` y después una respuesta válida.
 
 Validación: 21 pruebas de bencode y 10 de tracker pasan (1 de red pública ignorada); 30 pruebas de aplicación y 6 de almacenamiento pasan (1 pública ignorada), más la prueba de URL excesiva seguida de URL válida. Cuerpos chunked, EOF, longitud falsa/truncada, límite exacto y exceso; profundidad 50.000, campos ignorados, límite de valores, tamaños de cadena falsos y extremos numéricos. Clippy de bencode y tracker con `-D warnings` pasa. Diff contra las fuentes originales y el código de aplicación revisado sin hallazgos bloqueantes.
+
+## F4: verificación completa y checkpoints ordenados
+
+El arranque verifica todas las piezas del disco, independientemente de los bits persistidos. Se elimina el muestreo y la rama que interpretaba `Ok(false)` como éxito. También recupera piezas escritas después del último checkpoint. `Core` desactiva fast resume; la opción heredada del motor solo habilita checkpoints, nunca omite hashes. Una optimización basada en identidad/mtime de archivos queda deshabilitada: ni identidad ni tamaño sustituyen la comprobación de contenido. El coste es más lectura al reiniciar torrents grandes.
+
+Con checkpoints habilitados: sincronizar payload → escribir snapshot temporal → sincronizar snapshot → rename atómico → sincronizar directorio. Si falla el primer paso, no se publica el mapa. Se elimina el worker con cola ilimitada y el flush automático al destruir el bitmap; no pueden persistir un estado que se salte la barrera. El mapa activo se construye desde los resultados verificados en memoria, sin volver a confiar en el archivo recién guardado. TorrentCat utiliza almacenamiento filesystem/JSON; el backend PostgreSQL opcional conserva su contrato, pero no se declara validado como producto.
+
+El menú de un torrent pausado ofrece **Verify files**. Reabre los archivos mediante el directorio confinado, vuelve a comprobarlos y conserva ID, contadores, selección y pausa. Las llamadas sobre torrents activos se rechazan antes de esperar tareas de tracker. La operación no inicia descubrimiento ni transferencias.
+
+Self-review: se eliminó el read-back del bitmap después de guardarlo para evitar reintroducir confianza en bytes que otro proceso pueda cambiar. El backend de prueba de fallo de sync necesitó conservar la identidad de su filesystem subyacente, porque la persistencia rechaza otros backends; la prueba final alcanza la barrera y confirma que no existe checkpoint. Se retiraron las interfaces internas de carga/borrado del fast resume que ya no se usan.
+
+Validación: 42 pruebas de aplicación/integración pasan y 1 pública se ignora; 29 pruebas del motor pasan, 3 están ignoradas y 5 E2E se excluyen de esta ejecución (la suite de aplicación ya cubre transferencias loopback). Incluye modificaciones del mismo tamaño, sustitución, truncado, corrupción de la pieza 100, bitmap truncado, salida de proceso sin destructores, recheck manual y fallo inyectado de sync. Prueba de checkpoint: sustitución de longitud, error al publicar, limpieza de temporales y ausencia de flush en Drop. Build TypeScript/Vite y Clippy del motor con `-D warnings` pasan. No se simula una pérdida física de energía; la durabilidad se basa en las barreras del sistema operativo.
+
+Los tres crates vendorizados son miembros del workspace, con la aplicación como miembro predeterminado, para ejecutar sus pruebas explícitamente. El lock incorpora dependencias opcionales/de prueba; no cambia ninguna versión previamente fijada ni activa esas capacidades en el binario de TorrentCat. Los comandos del motor usan `--no-default-features --features rust-tls`.

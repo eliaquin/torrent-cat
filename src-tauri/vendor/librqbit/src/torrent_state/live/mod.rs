@@ -153,16 +153,22 @@ impl TorrentStateLocked {
         self.pieces.as_mut().ok_or(Error::ChunkTrackerEmpty)
     }
 
-    fn try_flush_bitv(&mut self, shared: &ManagedTorrentShared, flush_async: bool) {
+    fn try_flush_bitv(
+        &mut self,
+        shared: &ManagedTorrentShared,
+        files: &dyn crate::storage::TorrentStorage,
+        flush_async: bool,
+    ) {
         if self.unflushed_bitv_bytes == 0 {
             return;
         }
         trace!("trying to flush bitfield");
-        if let Some(Err(e)) = self
-            .pieces
-            .as_mut()
-            .map(|pt| pt.flush_have_pieces(flush_async))
-        {
+        if let Some(Err(e)) = self.pieces.as_mut().map(|pt| {
+            if pt.chunks().get_have_pieces().is_persistent() {
+                files.sync_all()?;
+            }
+            pt.flush_have_pieces(flush_async)
+        }) {
             warn!(id=?shared.id, info_hash = ?shared.info_hash, "error flushing bitfield: {e:#}");
         } else {
             trace!("flushed bitfield");
@@ -867,13 +873,13 @@ impl TorrentStateLive {
 
         locked.unflushed_bitv_bytes += self.metadata.lengths().piece_length(id) as u64;
         if locked.unflushed_bitv_bytes >= FLUSH_BITV_EVERY_BYTES {
-            locked.try_flush_bitv(&self.shared, true)
+            locked.try_flush_bitv(&self.shared, &self.files, true)
         }
 
         let chunks = locked.get_chunks()?;
         if chunks.is_finished() {
             if chunks.get_selected_pieces()[id.get_usize()] {
-                locked.try_flush_bitv(&self.shared, false);
+                locked.try_flush_bitv(&self.shared, &self.files, false);
                 info!(id=self.shared.id, info_hash=?self.shared.info_hash, "torrent finished downloading");
             }
             self.finished_notify.notify_waiters();

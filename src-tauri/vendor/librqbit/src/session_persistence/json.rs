@@ -186,30 +186,6 @@ impl JsonSessionPersistenceStore {
 
 #[async_trait::async_trait]
 impl BitVFactory for JsonSessionPersistenceStore {
-    async fn load(&self, id: TorrentIdOrHash) -> anyhow::Result<Option<Box<dyn BitV>>> {
-        let h = self.to_hash(id).await?;
-        let filename = self.bitv_filename(&h);
-        match DiskBackedBitV::new(filename, self.spawner.clone()).await {
-            Ok(bitv) => Ok(Some(bitv.into_dyn())),
-            Err(e) => {
-                if let Some(e) = e.downcast_ref::<std::io::Error>()
-                    && matches!(e.kind(), std::io::ErrorKind::NotFound)
-                {
-                    return Ok(None);
-                }
-                return Err(e);
-            }
-        }
-    }
-
-    async fn clear(&self, id: TorrentIdOrHash) -> anyhow::Result<()> {
-        let h = self.to_hash(id).await?;
-        let filename = self.bitv_filename(&h);
-        tokio::fs::remove_file(&filename)
-            .await
-            .with_context(|| format!("error removing {filename:?}"))
-    }
-
     async fn store_initial_check(
         &self,
         id: TorrentIdOrHash,
@@ -217,25 +193,13 @@ impl BitVFactory for JsonSessionPersistenceStore {
     ) -> anyhow::Result<Box<dyn BitV>> {
         let h = self.to_hash(id).await?;
         let filename = self.bitv_filename(&h);
-        let tmp_filename = format!("{}.tmp", filename.to_str().context("bug")?);
-        let mut dst = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_filename)
-            .await
-            .with_context(|| format!("error opening {filename:?}"))?;
-        tokio::io::copy(&mut b.as_raw_slice(), &mut dst)
-            .await
-            .context("error writing bitslice to {filename:?}")?;
-        tokio::fs::rename(&tmp_filename, &filename)
-            .await
-            .with_context(|| format!("error renaming {tmp_filename:?} to {filename:?}"))?;
+        self.spawner
+            .block_in_place_with_semaphore(|| {
+                crate::bitv::persist_snapshot(&filename, b.as_raw_slice())
+            })
+            .await?;
         trace!(?filename, "stored initial check bitfield");
-        Ok(DiskBackedBitV::new(filename.clone(), self.spawner.clone())
-            .await
-            .with_context(|| format!("error constructing MmapBitV from file {filename:?}"))?
-            .into_dyn())
+        Ok(DiskBackedBitV::new(filename, b).into_dyn())
     }
 }
 

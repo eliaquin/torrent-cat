@@ -118,6 +118,21 @@ impl<U: StorageFactory + ?Sized> StorageFactory for Box<U> {
 }
 
 pub trait TorrentStorage: Send + Sync {
+    /// Make payload durable before persisting any bitmap that claims it exists.
+    /// Backends without this guarantee must use nonpersistent checkpoints.
+    fn sync_all(&self) -> anyhow::Result<()> {
+        anyhow::bail!("storage does not support durable checkpoints")
+    }
+
+    /// Reopen current paths before an explicit integrity check.
+    fn refresh(
+        &mut self,
+        _shared: &ManagedTorrentShared,
+        _metadata: &TorrentMetadata,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("storage does not support reopening files for verification")
+    }
+
     // Create/open files etc.
     fn init(
         &mut self,
@@ -171,6 +186,17 @@ pub trait TorrentStorage: Send + Sync {
 }
 
 impl<U: TorrentStorage + ?Sized> TorrentStorage for Box<U> {
+    fn refresh(
+        &mut self,
+        shared: &ManagedTorrentShared,
+        metadata: &TorrentMetadata,
+    ) -> anyhow::Result<()> {
+        (**self).refresh(shared, metadata)
+    }
+
+    fn sync_all(&self) -> anyhow::Result<()> {
+        (**self).sync_all()
+    }
     fn pread_exact(&self, file_id: usize, offset: u64, buf: &mut [u8]) -> anyhow::Result<()> {
         (**self).pread_exact(file_id, offset, buf)
     }
