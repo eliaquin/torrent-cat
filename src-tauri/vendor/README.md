@@ -12,7 +12,9 @@ TorrentCat modifications:
   `cap-std`. On macOS reject a symbolic-link download root. Keep the root folder
   on removal so a replaced path cannot cause deletion of an unrelated directory.
 - Bind UDP responses to the pending request endpoint and action, preserving the
-  transaction reservation through delivery and cancellation.
+  transaction reservation through delivery and cancellation. Use BEP 15 retry
+  delays, renew expired connection IDs, try alternate DNS addresses and preserve
+  path/query through bounded BEP 41 URLData options.
 - Bound HTTP response bodies, local metadata reads, tracker peer lists and IDs,
   bencode depth/value/byte budgets and numeric conversion. Reject unrepresentable
   announce deadlines without terminating the monitor.
