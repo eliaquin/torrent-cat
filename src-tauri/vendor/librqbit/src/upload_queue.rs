@@ -15,7 +15,13 @@ pub(crate) const SESSION_REQUESTS: usize = 1024;
 #[derive(Default, Debug)]
 struct Pending {
     interested: bool,
-    requests: HashMap<ChunkInfo, Arc<CancellationToken>>,
+    requests: HashMap<ChunkInfo, PendingRequest>,
+}
+
+#[derive(Debug)]
+struct PendingRequest {
+    cancel: Arc<CancellationToken>,
+    _peer_permit: OwnedSemaphorePermit,
 }
 
 #[derive(Debug)]
@@ -37,15 +43,15 @@ impl PeerUploads {
         let changed = pending.interested != interested;
         pending.interested = interested;
         if !interested {
-            for (_, token) in pending.requests.drain() {
-                token.cancel();
+            for (_, request) in pending.requests.drain() {
+                request.cancel.cancel();
             }
         }
         changed
     }
     pub fn cancel(&self, chunk: &ChunkInfo) {
-        if let Some(token) = self.pending.lock().requests.remove(chunk) {
-            token.cancel();
+        if let Some(request) = self.pending.lock().requests.remove(chunk) {
+            request.cancel.cancel();
         }
     }
     pub fn admit(self: &Arc<Self>, chunk: ChunkInfo) -> anyhow::Result<Option<UploadRequest>> {
@@ -53,23 +59,26 @@ impl PeerUploads {
         if !pending.interested || pending.requests.contains_key(&chunk) {
             return Ok(None);
         }
-        let peer_permit = self
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| anyhow::anyhow!("peer upload request limit exceeded"))?;
-        let session_permit = self
-            .session_slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| anyhow::anyhow!("session upload request limit exceeded"))?;
+        // Saturation is transient local backpressure, not peer misbehavior.
+        // Unadmitted legacy requests may be retried; never close the connection.
+        let Ok(peer_permit) = self.slots.clone().try_acquire_owned() else {
+            return Ok(None);
+        };
+        let Ok(session_permit) = self.session_slots.clone().try_acquire_owned() else {
+            return Ok(None);
+        };
         let cancel = Arc::new(CancellationToken::new());
-        pending.requests.insert(chunk, cancel.clone());
+        pending.requests.insert(
+            chunk,
+            PendingRequest {
+                cancel: cancel.clone(),
+                _peer_permit: peer_permit,
+            },
+        );
         Ok(Some(UploadRequest {
             chunk,
             cancel,
             owner: self.clone(),
-            _peer_permit: peer_permit,
             _session_permit: session_permit,
         }))
     }
@@ -80,7 +89,6 @@ pub(crate) struct UploadRequest {
     pub chunk: ChunkInfo,
     pub cancel: Arc<CancellationToken>,
     owner: Arc<PeerUploads>,
-    _peer_permit: OwnedSemaphorePermit,
     _session_permit: OwnedSemaphorePermit,
 }
 impl Drop for UploadRequest {
@@ -89,7 +97,7 @@ impl Drop for UploadRequest {
         if pending
             .requests
             .get(&self.chunk)
-            .is_some_and(|token| Arc::ptr_eq(token, &self.cancel))
+            .is_some_and(|request| Arc::ptr_eq(&request.cancel, &self.cancel))
         {
             pending.requests.remove(&self.chunk);
         }
@@ -158,14 +166,14 @@ mod tests {
         for i in 1..PER_PEER_REQUESTS as u32 {
             held.push(peer.admit(chunk(i)).unwrap().unwrap());
         }
-        assert!(peer.admit(chunk(32)).is_err());
+        assert!(peer.admit(chunk(32)).unwrap().is_none());
         assert_eq!(
             budget.available_permits(),
             SESSION_REQUESTS - PER_PEER_REQUESTS
         );
         peer.set_interested(false);
         assert!(held.iter().all(|r| r.cancel.is_cancelled()));
-        // Cancellation cannot free capacity while a queue still retains the job.
+        // Global retained-job capacity stays bounded until the queue drains.
         assert_eq!(
             budget.available_permits(),
             SESSION_REQUESTS - PER_PEER_REQUESTS
@@ -184,7 +192,7 @@ mod tests {
         a.cancel(&chunk(0));
         let new = a.admit(chunk(0)).unwrap().unwrap();
         assert!(!new.cancel.is_cancelled());
-        assert!(b.admit(chunk(0)).is_err());
+        assert!(b.admit(chunk(0)).unwrap().is_none());
         drop(old);
         assert!(
             a.admit(chunk(0)).unwrap().is_none(),
@@ -195,6 +203,30 @@ mod tests {
         drop(other);
         assert_eq!(budget.available_permits(), 2);
     }
+    #[test]
+    fn cancellation_releases_peer_slots_without_unbounding_retained_jobs() {
+        let budget = Arc::new(Semaphore::new(SESSION_REQUESTS));
+        let peer = PeerUploads::new(budget.clone());
+        peer.set_interested(true);
+        let mut old = Vec::new();
+        let mut new = Vec::new();
+        for i in 0..32 {
+            old.push(peer.admit(chunk(i)).unwrap().unwrap());
+        }
+        for i in 0..32 {
+            peer.cancel(&chunk(i));
+        }
+        for i in 32..64 {
+            new.push(peer.admit(chunk(i)).unwrap().unwrap());
+        }
+        assert_eq!(peer.pending.lock().requests.len(), 32);
+        assert_eq!(budget.available_permits(), SESSION_REQUESTS - 64);
+        assert!(old.iter().all(|r| r.cancel.is_cancelled()));
+        drop(old);
+        drop(new);
+        assert_eq!(budget.available_permits(), SESSION_REQUESTS);
+    }
+
     #[test]
     fn ready_peers_receive_round_robin_service() {
         let a = "127.0.0.1:1".parse().unwrap();
