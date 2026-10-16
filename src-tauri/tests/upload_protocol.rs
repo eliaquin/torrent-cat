@@ -193,6 +193,23 @@ async fn negotiated_ids_survive_deltas_and_disable_without_disconnect() {
         peer.write_all(&request).await.unwrap();
         assert_eq!(&message(&mut peer).await[..2], &[20, id]);
     }
+    // An invalid request is rejected, with no panic or connection teardown.
+    for piece in [1, u32::MAX] {
+        peer.write_all(&extension(
+            3,
+            format!("d8:msg_typei0e5:piecei{piece}ee").as_bytes(),
+        ))
+        .await
+        .unwrap();
+        let rejected = message(&mut peer).await;
+        assert_eq!(&rejected[..2], &[20, 7]);
+        assert_eq!(
+            &rejected[2..],
+            format!("d8:msg_typei2e5:piecei{piece}ee").as_bytes()
+        );
+        peer.write_all(&request).await.unwrap();
+        assert_eq!(&message(&mut peer).await[..2], &[20, 7]);
+    }
     peer.write_all(&extension(0, b"d1:md11:ut_metadatai0e6:ut_pexi0eee"))
         .await
         .unwrap();

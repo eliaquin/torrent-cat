@@ -56,7 +56,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use buffers::{ByteBuf, ByteBufOwned};
 use clone_to_owned::CloneToOwned;
 use librqbit_core::{
@@ -2204,31 +2204,11 @@ impl PeerHandler {
     }
 
     fn send_metadata_piece(&self, piece_id: u32) -> anyhow::Result<()> {
-        let data = &self.state.metadata.info_bytes;
-        let metadata_size = data.len();
-        if metadata_size == 0 {
-            anyhow::bail!("peer requested for info metadata but we don't have it")
-        }
-        let total_pieces: usize = (metadata_size as u64)
-            .div_ceil(CHUNK_SIZE as u64)
-            .try_into()?;
-
-        if piece_id as usize > total_pieces {
-            bail!("piece out of bounds")
-        }
-
-        let offset = piece_id * CHUNK_SIZE;
-        let end = (offset + CHUNK_SIZE).min(data.len().try_into()?);
-        let total_size: u32 = data
-            .len()
-            .try_into()
-            .context("can't send metadata: len doesn't fit into u32")?;
-        let data = data.slice(offset as usize..end as usize);
-
         self.tx
-            .send(WriterRequest::UtMetadata(UtMetadata::Data(
-                UtMetadataData::from_bytes(piece_id, total_size, data.into()),
-            )))
+            .send(WriterRequest::UtMetadata(metadata_response(
+                &self.state.metadata.info_bytes,
+                piece_id,
+            )?))
             .context("error sending UtMetadata: channel closed")?;
         Ok(())
     }
@@ -2378,5 +2358,54 @@ mod pex_tests {
             "[::ffff:8.8.8.8]:1".parse().unwrap(),
             "[::ffff:192.168.1.2]:1".parse().unwrap()
         ));
+    }
+}
+
+// Validate before arithmetic/slicing; rejected requests retain their original ID.
+fn metadata_response(data: &bytes::Bytes, piece: u32) -> anyhow::Result<UtMetadata<ByteBufOwned>> {
+    let total_size = u32::try_from(data.len()).context("metadata exceeds protocol size")?;
+    let offset = usize::try_from(piece)
+        .ok()
+        .and_then(|p| p.checked_mul(CHUNK_SIZE as usize));
+    let Some(offset) = offset.filter(|o| *o < data.len()) else {
+        return Ok(UtMetadata::Reject(piece));
+    };
+    let end = offset.saturating_add(CHUNK_SIZE as usize).min(data.len());
+    Ok(UtMetadata::Data(UtMetadataData::from_bytes(
+        piece,
+        total_size,
+        data.slice(offset..end).into(),
+    )))
+}
+
+#[cfg(test)]
+mod metadata_response_tests {
+    use super::*;
+    #[test]
+    fn aligned_unaligned_empty_and_extreme_requests_are_bounded() {
+        for len in [0usize, 1, 16383, 16384, 16385, 32768] {
+            let data = bytes::Bytes::from(vec![42; len]);
+            let count = len.div_ceil(CHUNK_SIZE as usize) as u32;
+            for piece in [0, count.saturating_sub(1), count, count + 1, u32::MAX] {
+                match metadata_response(&data, piece).unwrap().as_borrowed() {
+                    UtMetadata::Data(d) => {
+                        assert!(piece < count);
+                        assert_eq!(d.piece(), piece);
+                        assert_eq!(
+                            d.len(),
+                            (len - piece as usize * CHUNK_SIZE as usize).min(CHUNK_SIZE as usize)
+                        );
+                        let mut actual = vec![0; d.len()];
+                        d.copy_to_slice(&mut actual);
+                        assert_eq!(actual, vec![42; d.len()]);
+                    }
+                    UtMetadata::Reject(id) => {
+                        assert!(piece >= count);
+                        assert_eq!(id, piece);
+                    }
+                    _ => panic!("unexpected request response"),
+                }
+            }
+        }
     }
 }
