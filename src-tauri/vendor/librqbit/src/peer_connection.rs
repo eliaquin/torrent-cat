@@ -393,7 +393,7 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
 
                 tokio::task::yield_now().await;
 
-                let mut uploaded_add = None;
+                let mut payload_start = None;
                 let mut upload_guard = None;
                 let mut pex_reply = None;
 
@@ -487,7 +487,7 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
                         if request.cancel.is_cancelled() {
                             continue;
                         }
-                        uploaded_add = Some(chunk.size);
+                        payload_start = Some(preamble_len);
                         upload_guard = Some(request);
                         full_len
                     }
@@ -503,13 +503,17 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
                 with_timeout(
                     "writing",
                     rwtimeout,
-                    write.write_all(&write_buf[..len]).map_err(Error::Write),
+                    write_counted_payload(
+                        &mut write,
+                        &write_buf[..len],
+                        payload_start.unwrap_or(len),
+                        |accepted| {
+                            self.handler.on_uploaded_bytes(accepted);
+                        },
+                    )
+                    .map_err(Error::Write),
                 )
                 .await?;
-
-                if let Some(uploaded_add) = uploaded_add {
-                    self.handler.on_uploaded_bytes(uploaded_add)
-                }
                 if let Some(reply) = pex_reply {
                     let _ = reply.send(true);
                 }
@@ -568,5 +572,188 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
                 r
             }
         }
+    }
+}
+
+/// Count only piece payload accepted by AsyncWrite, excluding the wire preamble.
+/// The callback runs in the same poll as each successful write, before another
+/// await can be canceled. This measures transport acceptance, not remote receipt
+/// or TCP retransmissions; a later error cannot erase bytes already accepted.
+async fn write_counted_payload<W: tokio::io::AsyncWrite + Unpin + ?Sized>(
+    writer: &mut W,
+    frame: &[u8],
+    payload_start: usize,
+    mut accepted: impl FnMut(u32),
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    if payload_start > frame.len() || frame.len() - payload_start > u32::MAX as usize {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid piece payload bounds",
+        ));
+    }
+    let mut offset = 0;
+    while offset < frame.len() {
+        let n = writer.write(&frame[offset..]).await?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        let end = offset + n;
+        let payload_bytes =
+            end.saturating_sub(payload_start) - offset.saturating_sub(payload_start);
+        if payload_bytes != 0 {
+            // The complete payload was checked to fit u32 above.
+            accepted(payload_bytes.try_into().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "transport exceeded piece bounds",
+                )
+            })?);
+        }
+        offset = end;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod upload_accounting_tests {
+    use super::write_counted_payload;
+    use std::{
+        cell::Cell,
+        io,
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    use tokio::io::AsyncWrite;
+
+    #[derive(Clone, Copy)]
+    enum End {
+        Error,
+        Zero,
+        Pending,
+    }
+    struct Transport {
+        limit: usize,
+        chunk: usize,
+        bytes: Vec<u8>,
+        end: End,
+    }
+    impl AsyncWrite for Transport {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let n = buf
+                .len()
+                .min(self.chunk)
+                .min(self.limit.saturating_sub(self.bytes.len()));
+            if n == 0 {
+                return match self.end {
+                    End::Error => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
+                    End::Zero => Poll::Ready(Ok(0)),
+                    End::Pending => Poll::Pending,
+                };
+            }
+            self.bytes.extend_from_slice(&buf[..n]);
+            Poll::Ready(Ok(n))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+    #[tokio::test]
+    async fn partial_writes_count_only_accepted_payload_before_error_or_zero() {
+        let frame = vec![42; 13 + 16384];
+        for end in [End::Error, End::Zero] {
+            for limit in (0..=14).chain([13 + 511, 13 + 16383, frame.len()]) {
+                let mut transport = Transport {
+                    limit,
+                    chunk: 7,
+                    bytes: Vec::new(),
+                    end,
+                };
+                let count = Cell::new(0);
+                let result = write_counted_payload(&mut transport, &frame, 13, |n| {
+                    count.set(count.get() + n)
+                })
+                .await;
+                if limit == frame.len() {
+                    result.unwrap();
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().kind(),
+                        if matches!(end, End::Zero) {
+                            io::ErrorKind::WriteZero
+                        } else {
+                            io::ErrorKind::BrokenPipe
+                        }
+                    );
+                }
+                assert_eq!(count.get() as usize, limit.saturating_sub(13));
+                assert_eq!(transport.bytes, frame[..limit]);
+            }
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn timeout_and_cancellation_preserve_progress_and_control_frames_do_not_count() {
+        let frame = vec![42; 13 + 16384];
+        for limit in [0, 12, 13, 14, 13 + 8192] {
+            let mut transport = Transport {
+                limit,
+                chunk: 7,
+                bytes: Vec::new(),
+                end: End::Pending,
+            };
+            let count = Cell::new(0);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                write_counted_payload(&mut transport, &frame, 13, |n| count.set(count.get() + n)),
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(count.get() as usize, limit.saturating_sub(13));
+            let mut transport = Transport {
+                limit,
+                chunk: 3,
+                bytes: Vec::new(),
+                end: End::Pending,
+            };
+            let count = Cell::new(0);
+            let mut future = Box::pin(write_counted_payload(&mut transport, &frame, 13, |n| {
+                count.set(count.get() + n)
+            }));
+            assert!(futures::poll!(&mut future).is_pending());
+            drop(future);
+            assert_eq!(count.get() as usize, limit.saturating_sub(13));
+        }
+        let mut transport = Transport {
+            limit: frame.len(),
+            chunk: 1,
+            bytes: Vec::new(),
+            end: End::Error,
+        };
+        write_counted_payload(&mut transport, &frame, frame.len(), |_| {
+            panic!("control bytes counted as upload")
+        })
+        .await
+        .unwrap();
+        let mut transport = Transport {
+            limit: frame.len(),
+            chunk: 1,
+            bytes: Vec::new(),
+            end: End::Error,
+        };
+        assert_eq!(
+            write_counted_payload(&mut transport, &frame, frame.len() + 1, |_| panic!())
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(transport.bytes.is_empty());
     }
 }

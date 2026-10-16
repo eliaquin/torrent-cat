@@ -27,7 +27,9 @@ TorrentCat modifications:
   retry and restart, and atomically sync JSON/metainfo plus unlink directories.
   Serialize operations per torrent, deduplicate concurrent magnet resolution and
   preserve monotonic persisted IDs. Join owned tasks and bound total final announces.
-- Track actual payload bytes across pauses, independently of verified disk data.
+- Count upload payload at each successful transport write, including interrupted
+  frames and explicit retransfers, excluding protocol headers/control messages.
+  Preserve session totals across pauses, independently of verified disk data.
 - Calculate tracker `left` across all files, including deselected files.
 - Send HTTP/UDP lifecycle events and await bounded stopped requests on pause,
   removal and shutdown. Respect both tracker interval and minimum interval;

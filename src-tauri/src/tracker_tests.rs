@@ -1144,3 +1144,93 @@ async fn final_announces_have_a_total_budget_across_multiple_failed_trackers() {
         .expect("shutdown budget must not grow with tracker count");
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn corrupt_then_repeated_download_counts_wire_bytes_but_left_tracks_verification() {
+    let tracker = Tracker::http(1, 1).await;
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("payload.bin");
+    std::fs::write(&source, vec![42; 16384]).unwrap();
+    let mut bytes = Vec::new();
+    lava_torrent::torrent::v1::TorrentBuilder::new(&source, 16384)
+        .set_num_threads(1)
+        .set_privacy(true)
+        .set_announce(Some(tracker.url.clone()))
+        .build()
+        .unwrap()
+        .write_into(&mut bytes)
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    tracker.state.lock().unwrap().peers = vec![listener.local_addr().unwrap()];
+    let raw_peer = tokio::spawn(async move {
+        for payload in [0, 42] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut handshake = [0; 68];
+            stream.read_exact(&mut handshake).await.unwrap();
+            handshake[20..28].fill(0);
+            handshake[48..].fill(77);
+            stream.write_all(&handshake).await.unwrap();
+            stream
+                .write_all(&[0, 0, 0, 2, 5, 128, 0, 0, 0, 1, 1])
+                .await
+                .unwrap(); // Have piece 0, unchoke.
+            loop {
+                let len = stream.read_u32().await.unwrap();
+                assert!(len < 20000);
+                let mut message = vec![0; len as usize];
+                stream.read_exact(&mut message).await.unwrap();
+                if message.first() == Some(&6) {
+                    assert_eq!(message.len(), 13);
+                    assert_eq!(&message[1..9], &[0; 8]);
+                    assert_eq!(&message[9..], &16384u32.to_be_bytes());
+                    let mut piece = vec![payload; 13 + 16384];
+                    piece[..4].copy_from_slice(&16393u32.to_be_bytes());
+                    piece[4] = 7;
+                    piece[5..13].fill(0);
+                    stream.write_all(&piece).await.unwrap();
+                    break;
+                }
+            }
+            let mut sink = Vec::new();
+            let _ = stream.read_to_end(&mut sink).await;
+        }
+    });
+    let output = root.path().join("download");
+    let client = session(&output, None).await;
+    let h = add(&client, &bytes, &output, None, vec![], vec![]).await;
+    tracker
+        .wait(|r| r.iter().any(|r| r.number("downloaded") == 16384))
+        .await;
+    client.pause(&h).await.unwrap();
+    let failed = tracker.records().last().unwrap().clone();
+    assert_eq!(failed.event(), "stopped");
+    assert_eq!(failed.number("downloaded"), 16384);
+    assert_eq!(
+        failed.number("left"),
+        16384,
+        "failed hash must remain missing"
+    );
+    assert!(!tracker.records().iter().any(|r| r.event() == "completed"));
+    client.unpause(&h).await.unwrap();
+    tracker
+        .wait(|r| r.iter().any(|r| r.event() == "completed"))
+        .await;
+    assert_eq!(
+        std::fs::read(output.join("payload.bin")).unwrap(),
+        vec![42; 16384]
+    );
+    client.stop().await;
+    let final_announce = tracker.records().last().unwrap().clone();
+    assert_eq!(final_announce.event(), "stopped");
+    assert_eq!(
+        final_announce.number("downloaded"),
+        32768,
+        "both corrupt and replacement payloads crossed the wire"
+    );
+    assert_eq!(final_announce.number("left"), 0);
+    assert_eq!(final_announce.number("uploaded"), 0);
+    timeout(Duration::from_secs(3), raw_peer)
+        .await
+        .unwrap()
+        .unwrap();
+}
