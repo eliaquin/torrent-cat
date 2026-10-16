@@ -39,9 +39,19 @@ async fn seed_fixture_with_peers(
     std::sync::Arc<Session>,
     std::sync::Arc<librqbit::ManagedTorrent>,
 ) {
+    seed_fixture_with_blocks(peers, 2).await
+}
+async fn seed_fixture_with_blocks(
+    peers: Vec<std::net::SocketAddr>,
+    blocks: usize,
+) -> (
+    tempfile::TempDir,
+    std::sync::Arc<Session>,
+    std::sync::Arc<librqbit::ManagedTorrent>,
+) {
     let tmp = tempfile::tempdir().unwrap();
     let file = tmp.path().join("payload.bin");
-    std::fs::write(&file, vec![42; 32768]).unwrap();
+    std::fs::write(&file, vec![42; 16384 * blocks]).unwrap();
     let mut bytes = Vec::new();
     lava_torrent::torrent::v1::TorrentBuilder::new(&file, 16384)
         .set_num_threads(1)
@@ -282,5 +292,68 @@ async fn repeated_pex_handshakes_emit_a_single_update() {
     );
     drop(peer);
     drop(other);
+    session.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forty_peers_at_the_request_window_keep_connections_under_global_backpressure() {
+    let (_tmp, session, h) = seed_fixture_with_blocks(vec![], 64).await;
+    session
+        .ratelimits
+        .set_upload_bps(std::num::NonZeroU32::new(1));
+    let mut peers = Vec::new();
+    for id in 0..40u8 {
+        let mut peer = TcpStream::connect(session.listen_addr().unwrap())
+            .await
+            .unwrap();
+        peer.write_all(
+            &[
+                &[19][..],
+                b"BitTorrent protocol",
+                &[0, 0, 0, 0, 0, 16, 0, 0],
+                &h.info_hash().0,
+                &[id; 20],
+            ]
+            .concat(),
+        )
+        .await
+        .unwrap();
+        peer.read_exact(&mut [0; 68]).await.unwrap();
+        assert_eq!(&message(&mut peer).await[..2], &[20, 0]);
+        assert_eq!(message(&mut peer).await[0], 5);
+        peer.write_all(&[0, 0, 0, 9, 5, 0, 0, 0, 0, 0, 0, 0, 0])
+            .await
+            .unwrap();
+        peer.write_all(&extension(0, b"d1:md11:ut_metadatai7e6:ut_pexi0eee"))
+            .await
+            .unwrap();
+        peer.write_all(&[0, 0, 0, 1, 2]).await.unwrap();
+        assert_eq!(message(&mut peer).await, [1]);
+        for piece in 0..32 {
+            peer.write_all(&request(6, piece)).await.unwrap();
+        }
+        peers.push(peer);
+    }
+    // Cancel and replace at the advertised per-peer limit while jobs remain queued.
+    for piece in 0..32 {
+        peers[0].write_all(&request(8, piece)).await.unwrap();
+    }
+    for piece in 32..64 {
+        peers[0].write_all(&request(6, piece)).await.unwrap();
+    }
+    for peer in &mut peers {
+        peer.write_all(&extension(3, b"d8:msg_typei0e5:piecei0ee"))
+            .await
+            .unwrap();
+        loop {
+            let m = message(peer).await;
+            if m.starts_with(&[20, 7]) {
+                break;
+            }
+        }
+    }
+    // Every connection handled a subsequent control request despite 1280
+    // offered uploads exceeding the shared 1024 retained-job budget.
+    drop(peers);
     session.stop().await;
 }

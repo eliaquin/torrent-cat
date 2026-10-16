@@ -212,3 +212,10 @@ La regresión local completa un magnet con primer tracker HTTP 503 y segundo con
 ### C5: completed anterior al primer contacto — confirmado y corregido
 
 Cada nuevo `started` toma el estado de finalización actual, también al volver a un tracker anterior. Si el torrent ya estaba completo antes de ese contacto, no genera un `completed` inmediato por una transición ocurrida fuera de esa sesión de anuncios. Si termina durante el contacto, conserva el evento normal. La regresión completa el torrent en la barrera de failover y comprueba en HTTP `started`, updates y `stopped`, sin `completed` en el respaldo. Self-review y las 21 pruebas de tracker (1 pública ignorada), junto con Clippy, pasan.
+
+
+### C3: saturación de subida y cancelación — confirmado y corregido
+
+La admisión llena devuelve “no admitida” en lugar de un error que cierre al peer. En el protocolo clásico esas solicitudes pueden reintentarse; no se promete respuesta inmediata bajo saturación ni se encolan fuera del presupuesto. Cancel/NotInterested liberan inmediatamente las plazas por peer. Los trabajos antiguos conservan su permiso global hasta salir de la cola/writer, por lo que un flood de cancelar/repetir no puede hacer crecer memoria sin límite. El guard conserva la comprobación de identidad para no retirar una solicitud nueva al soltar una antigua.
+
+Self-review: se comprobó la separación entre plazas lógicas por peer y trabajos retenidos globalmente, incluyendo escritura parcial ya iniciada. La prueba TCP conecta 40 peers, ofrece 32 solicitudes por peer con subida limitada y luego solicita metadata por cada conexión: las 40 responden. También cancela/reemplaza 32 solicitudes en una conexión. La regresión unitaria conserva los trabajos cancelados al admitir los nuevos y verifica ambos presupuestos. Pasan 50 pruebas del motor (3 ignoradas, 5 E2E excluidas), la prueba de 40 peers y Clippy.
