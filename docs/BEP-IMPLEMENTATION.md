@@ -17,8 +17,8 @@ Las referencias de líneas de la auditoría describen el commit base, no el cód
 | F9 — ciclo de vida y persistencia | Integrado en `d4e988e` y publicado | Fallos de disco, reinicio abrupto, tracker silencioso y cierre de conexiones |
 | F10 — contabilidad de escrituras parciales | Integrado en `ead35c1` y publicado | Transporte controlado, corrupción/repetición y anuncios locales |
 | F11 — recuperación de metadata persistida | Integrado en `cd72889` y publicado | Entradas visibles, reparación por hash y cero descubrimiento |
-| F12 — pausa y borrado durante inicialización | Implementado, revisado y validado | Barrera de permisos, cancelación y stream de peers |
-| F13 — límites al servir metadata | Pendiente | |
+| F12 — pausa y borrado durante inicialización | Integrado en `beef272` y publicado | Barrera de permisos, cancelación y stream de peers |
+| F13 — límites al servir metadata | Implementado, revisado y validado | Índices extremos, bloques alineados y peer TCP |
 | F14 — secuencia al recibir metadata | Pendiente | |
 | F15 — buffers para mapas de piezas | Pendiente | |
 
@@ -147,3 +147,10 @@ La pausa cancela la espera del permiso y los puntos asíncronos del chequeo, y l
 Self-review: se detectó además que reanudar una inicialización originalmente pausada perdía el nuevo stream de peers. Ahora el estado de inicialización conserva la actualización y la entrega al pasar a Live. Un segundo start no borra la cancelación del chequeo en curso. Se revisó el orden de locks, la liberación del guard antes del registro de tareas y la ausencia de trabajo de disco separado que pueda sobrevivir al borrado.
 
 Validación: barreras deterministas retienen todos los permisos de inicialización; pausa, borrado y cierre terminan sin liberarlas y sin tareas de transferencia restantes. Tras liberar, el torrent borrado no reaparece y el pausado puede reanudar. Otra barrera comprueba que el stream actualizado se consume al pasar a Live. 43 pruebas del motor pasan (3 ignoradas, 5 E2E excluidas), la suite de aplicación/integración y Clippy con `-D warnings` pasan. Fixtures temporales sin descubrimiento externo.
+
+
+## F13: límites al servir metadata
+
+El servidor valida el índice antes de multiplicar o crear slices. Un índice inexistente recibe `reject` con el índice original, también para metadata vacía. El tamaño total se convierte con comprobación y el cálculo del rango no puede desbordarse. Las solicitudes válidas conservan su bloque y tamaño.
+
+Self-review: además de corregir `>` por un límite exclusivo, se eliminó la multiplicación u32 vulnerable a desbordamiento y se mantuvo viva la conexión después del rechazo. La política privada existente no publica metadata. Validación: matriz de tamaños 0/1/16.383/16.384/16.385/32.768 y último/primer índice inválido/extremo; un peer TCP solicita 1 y u32::MAX sobre metadata de una pieza, recibe rejects y vuelve a obtener la pieza cero por la misma conexión. 44 pruebas del motor pasan (3 ignoradas y 5 E2E excluidas), la prueba TCP y Clippy con `-D warnings` pasan.
