@@ -3,7 +3,7 @@ use std::{
     ffi::CStr,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{Context, bail};
@@ -11,6 +11,7 @@ use librqbit_core::{hash_id::Id20, spawn_utils::spawn_with_cancel};
 use librqbit_dualstack_sockets::{BindDevice, UdpSocket};
 use parking_lot::RwLock;
 use rand::RngExt;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, trace, warn};
 
@@ -26,6 +27,25 @@ pub const EVENT_STOPPED: u32 = 3;
 
 pub type ConnectionId = u64;
 const CONNECTION_ID_MAGIC: ConnectionId = 0x41727101980;
+const MAX_URL_DATA: usize = 4096;
+fn retry_delay(attempt: u32) -> Duration {
+    Duration::from_secs(15 * (1u64 << attempt.min(8)))
+}
+
+fn encode_url_data(data: &[u8], packet: &mut Vec<u8>) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        data.len() <= MAX_URL_DATA,
+        "UDP tracker path/query too large"
+    );
+    if data.is_empty() {
+        packet.extend_from_slice(&[2, 0]);
+    }
+    for chunk in data.chunks(255) {
+        packet.extend_from_slice(&[2, chunk.len().try_into()?]);
+        packet.extend_from_slice(chunk);
+    }
+    Ok(())
+}
 
 pub type TransactionId = u32;
 
@@ -33,7 +53,7 @@ pub fn new_transaction_id() -> TransactionId {
     rand::rng().random()
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AnnounceFields {
     pub info_hash: Id20,
     pub peer_id: Id20,
@@ -183,10 +203,10 @@ impl Response {
     fn parse_response(action: u32, is_ipv6: bool, mut buf: &[u8]) -> anyhow::Result<Self> {
         let response = match action {
             ACTION_CONNECT => {
-                let (connection_id, b) =
+                let (connection_id, _) =
                     u64::parse_num(buf).context("can't parse connection id")?;
-                buf = b;
-                Response::Connect(connection_id)
+                // BEP 15 permits future fields after the fixed connect response.
+                return Ok(Response::Connect(connection_id));
             }
             ACTION_ANNOUNCE => {
                 let (interval, b) = u32::parse_num(buf).context("can't parse interval")?;
@@ -284,6 +304,7 @@ impl ClientLocked {
 }
 
 struct ClientShared {
+    cancel: CancellationToken,
     sock: UdpSocket,
     locked: RwLock<ClientLocked>,
 }
@@ -322,6 +343,7 @@ impl UdpTrackerClient {
 
         let client = Self {
             state: Arc::new(ClientShared {
+                cancel: cancel_token.clone(),
                 sock,
                 locked: RwLock::new(Default::default()),
             }),
@@ -360,55 +382,58 @@ impl UdpTrackerClient {
         }
     }
 
-    async fn get_connection_id(&self, addr: SocketAddr) -> anyhow::Result<ConnectionId> {
-        if let Some(m) = self.state.locked.read().connections.get(&addr)
-            && m.created.elapsed() < Duration::from_secs(60)
-        {
-            return Ok(m.id);
-        }
+    fn cached_connection_id(&self, addr: SocketAddr) -> Option<ConnectionId> {
+        self.state
+            .locked
+            .read()
+            .connections
+            .get(&addr)
+            .filter(|m| m.created.elapsed() < Duration::from_secs(60))
+            .map(|m| m.id)
+    }
 
-        let response = self.request(addr, Request::Connect).await?;
-        match response {
-            Response::Connect(connection_id) => {
-                self.state.locked.write().connections.insert(
-                    addr,
-                    ConnectionIdMeta {
-                        id: connection_id,
-                        created: Instant::now(),
-                    },
-                );
-                Ok(connection_id)
-            }
-            _ => anyhow::bail!("expected connect response"),
+    async fn request_once(
+        &self,
+        addr: SocketAddr,
+        request: Request,
+        url_data: &[u8],
+        delay: Duration,
+    ) -> anyhow::Result<Option<Response>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tid_g = self.reserve_transaction_id(addr, request.action(), tx)?;
+        let mut header = [0; 98];
+        let len = request.serialize(tid_g.tid, &mut header)?;
+        let mut packet = header[..len].to_vec();
+        if matches!(request, Request::Announce(..)) {
+            encode_url_data(url_data, &mut packet)?;
+        }
+        self.state
+            .sock
+            .send_to(&packet, addr)
+            .await
+            .context("UDP tracker send failed")?;
+        let received = tokio::select! {
+            _ = self.state.cancel.cancelled() => bail!("UDP tracker client stopped"),
+            result = tokio::time::timeout(delay, rx) => result,
+        };
+        match received {
+            Err(_) => Ok(None),
+            Ok(response) => match response.context("UDP response channel closed")? {
+                response @ Response::Error(_) => {
+                    self.state.locked.write().connections.remove(&addr);
+                    Ok(Some(response))
+                }
+                Response::Unknown => bail!("invalid UDP tracker response"),
+                response => Ok(Some(response)),
+            },
         }
     }
 
+    #[cfg(test)]
     async fn request(&self, addr: SocketAddr, request: Request) -> anyhow::Result<Response> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let tid_g = self.reserve_transaction_id(addr, request.action(), tx)?;
-
-        let mut write_buf = [0u8; 1024];
-        let len = request.serialize(tid_g.tid, &mut write_buf)?;
-        self.state
-            .sock
-            .send_to(&write_buf[..len], addr)
-            .await
-            .with_context(|| format!("error sending to {addr:?}"))?;
-
-        let response = tokio::time::timeout(Duration::from_secs(10), rx)
-            .await
-            .context("timeout connecting")?
-            .context("sender dead")?;
-        match &response {
-            Response::Error(e) => {
-                anyhow::bail!("remote errored: {e}")
-            }
-            Response::Unknown => {
-                anyhow::bail!("remote replied with something we could not parse")
-            }
-            _ => {}
-        }
-        Ok(response)
+        self.request_once(addr, request, &[], retry_delay(0))
+            .await?
+            .context("UDP tracker timeout")
     }
 
     fn reserve_transaction_id(
@@ -448,13 +473,77 @@ impl UdpTrackerClient {
         tracker: SocketAddr,
         fields: AnnounceFields,
     ) -> anyhow::Result<AnnounceResponse> {
-        let connection_id = self.get_connection_id(tracker).await?;
-        let request = Request::Announce(connection_id, fields);
-        let response = self.request(tracker, request).await?;
-        match response {
-            Response::Announce(r) => Ok(r),
-            other => bail!("unexpected response {other:?}, expected announce"),
+        self.announce_to_any(&[tracker], fields, &[]).await
+    }
+
+    async fn wait_after_send_error(&self, delay: Duration) -> anyhow::Result<()> {
+        tokio::select! {
+            _ = self.state.cancel.cancelled() => bail!("UDP tracker client stopped"),
+            _ = tokio::time::sleep(delay) => Ok(()),
         }
+    }
+
+    /// Try the resolved addresses in turn, with a shared BEP 15 retry clock.
+    /// Every timed-out exchange releases its transaction; late replies cannot
+    /// satisfy the subsequent exchange. Expired cookies are never retransmitted.
+    pub async fn announce_to_any(
+        &self,
+        addresses: &[SocketAddr],
+        fields: AnnounceFields,
+        url_data: &[u8],
+    ) -> anyhow::Result<AnnounceResponse> {
+        anyhow::ensure!(
+            !addresses.is_empty() && addresses.len() <= 8,
+            "UDP tracker requires 1 to 8 addresses"
+        );
+        anyhow::ensure!(
+            url_data.len() <= MAX_URL_DATA,
+            "UDP tracker path/query too large"
+        );
+        for attempt in 0..=8u32 {
+            anyhow::ensure!(
+                !self.state.cancel.is_cancelled(),
+                "UDP tracker client stopped"
+            );
+            let addr = addresses[attempt as usize % addresses.len()];
+            let delay = retry_delay(attempt);
+            let id = match self.cached_connection_id(addr) {
+                Some(id) => id,
+                None => match self.request_once(addr, Request::Connect, &[], delay).await {
+                    Ok(Some(Response::Connect(id))) => {
+                        self.state.locked.write().connections.insert(
+                            addr,
+                            ConnectionIdMeta {
+                                id,
+                                created: Instant::now(),
+                            },
+                        );
+                        id
+                    }
+                    Ok(None) => continue,
+                    Err(_) => {
+                        self.wait_after_send_error(delay).await?;
+                        continue;
+                    }
+                    Ok(Some(Response::Error(_))) => bail!("UDP tracker rejected connect"),
+                    _ => bail!("invalid UDP connect response"),
+                },
+            };
+            match self
+                .request_once(addr, Request::Announce(id, fields.clone()), url_data, delay)
+                .await
+            {
+                Ok(Some(Response::Announce(response))) => return Ok(response),
+                Ok(None) => continue,
+                Err(_) => {
+                    self.wait_after_send_error(delay).await?;
+                    continue;
+                }
+                Ok(Some(Response::Error(_))) => bail!("UDP tracker rejected announce"),
+                _ => bail!("invalid UDP announce response"),
+            }
+        }
+        bail!("UDP tracker retry budget exhausted")
     }
 }
 
@@ -699,5 +788,267 @@ mod tests {
             }
             other => panic!("unexpected response {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    fn fields() -> AnnounceFields {
+        AnnounceFields {
+            info_hash: Id20::default(),
+            peer_id: Id20::default(),
+            downloaded: 7,
+            left: 9,
+            uploaded: 5,
+            event: EVENT_STARTED,
+            key: 123,
+            port: 4242,
+        }
+    }
+    async fn receive(socket: &tokio::net::UdpSocket) -> (Vec<u8>, SocketAddr) {
+        // Keep the executor runnable while the virtual clock is paused; waiting
+        // on socket readiness alone would auto-advance the retry timer.
+        let wall = std::time::Instant::now();
+        let mut bytes = [0; 8192];
+        loop {
+            match socket.try_recv_from(&mut bytes) {
+                Ok((len, addr)) => return (bytes[..len].to_vec(), addr),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(wall.elapsed() < Duration::from_secs(3), "no datagram");
+                    tokio::task::yield_now().await;
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    }
+    async fn reply(
+        socket: &tokio::net::UdpSocket,
+        packet: &[u8],
+        addr: SocketAddr,
+        payload: &[u8],
+    ) {
+        socket
+            .send_to(&[&packet[8..16], payload].concat(), addr)
+            .await
+            .unwrap();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+    }
+    #[test]
+    fn url_data_is_chunked_without_decoding_or_truncation() {
+        for n in [0, 1, 254, 255, 256, 510, 4096] {
+            let data = vec![b'%'; n];
+            let mut packet = Vec::new();
+            encode_url_data(&data, &mut packet).unwrap();
+            let mut decoded = Vec::new();
+            let mut offset = 0;
+            while offset < packet.len() {
+                assert_eq!(packet[offset], 2);
+                let len = packet[offset + 1] as usize;
+                decoded.extend_from_slice(&packet[offset + 2..offset + 2 + len]);
+                offset += len + 2;
+            }
+            assert_eq!(decoded, data);
+        }
+        let mut untouched = Vec::new();
+        assert!(encode_url_data(&vec![0; 4097], &mut untouched).is_err());
+        assert!(untouched.is_empty());
+        assert_eq!(
+            (0..=9)
+                .map(|n| retry_delay(n).as_secs())
+                .collect::<Vec<_>>(),
+            vec![15, 30, 60, 120, 240, 480, 960, 1920, 3840, 3840]
+        );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn tracker_rejection_is_redacted_and_does_not_trigger_a_retry_burst() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        let cancel = CancellationToken::new();
+        let client = UdpTrackerClient::new(cancel.clone(), None).await.unwrap();
+        assert!(
+            client
+                .announce_to_any(&[addr], fields(), &vec![0; 4097])
+                .await
+                .is_err()
+        );
+        assert!(socket.try_recv_from(&mut [0; 8192]).is_err());
+        let c = client.clone();
+        let task = tokio::spawn(async move { c.announce(addr, fields()).await });
+        let (connect, peer) = receive(&socket).await;
+        let error = [
+            &ACTION_ERROR.to_be_bytes()[..],
+            &connect[12..16],
+            b"do-not-echo-tracker-text",
+        ]
+        .concat();
+        socket.send_to(&error, peer).await.unwrap();
+        let message = task.await.unwrap().unwrap_err().to_string();
+        assert!(!message.contains("do-not-echo"));
+        assert!(socket.try_recv_from(&mut [0; 8192]).is_err());
+        assert!(client.state.locked.read().transactions.is_empty());
+        cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ipv6_announce_decodes_ipv6_peers() {
+        let socket = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        let cancel = CancellationToken::new();
+        let client = UdpTrackerClient::new(cancel.clone(), None).await.unwrap();
+        let task = tokio::spawn(async move { client.announce(addr, fields()).await });
+        let (connect, peer) = receive(&socket).await;
+        reply(&socket, &connect, peer, &7u64.to_be_bytes()).await;
+        let (announce, peer) = receive(&socket).await;
+        let response = [
+            &60u32.to_be_bytes()[..],
+            &[0; 8],
+            &Ipv6Addr::LOCALHOST.octets(),
+            &4321u16.to_be_bytes(),
+        ]
+        .concat();
+        reply(&socket, &announce, peer, &response).await;
+        assert_eq!(
+            task.await.unwrap().unwrap().addrs,
+            vec!["[::1]:4321".parse::<SocketAddr>().unwrap()]
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_budget_is_finite_and_cookie_expires_at_sixty_seconds() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        let cancel = CancellationToken::new();
+        let client = UdpTrackerClient::new(cancel.clone(), None).await.unwrap();
+        client.state.locked.write().connections.insert(
+            addr,
+            ConnectionIdMeta {
+                id: 1,
+                created: Instant::now(),
+            },
+        );
+        tokio::time::advance(Duration::from_secs(59)).await;
+        assert_eq!(client.cached_connection_id(addr), Some(1));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(client.cached_connection_id(addr), None);
+        let c = client.clone();
+        let start = Instant::now();
+        let task = tokio::spawn(async move { c.announce(addr, fields()).await });
+        let mut elapsed = Duration::ZERO;
+        for attempt in 0..=8 {
+            let (packet, _) = receive(&socket).await;
+            assert_eq!(packet.len(), 16);
+            assert_eq!(start.elapsed(), elapsed);
+            let delay = retry_delay(attempt);
+            elapsed += delay;
+            tokio::time::advance(delay).await;
+        }
+        assert!(task.await.unwrap().is_err());
+        assert!(client.state.locked.read().transactions.is_empty());
+        assert!(socket.try_recv_from(&mut [0; 8192]).is_err());
+        cancel.cancel();
+        let packet = [
+            &ACTION_CONNECT.to_be_bytes()[..],
+            &1u32.to_be_bytes(),
+            &42u64.to_be_bytes(),
+            &[9; 8],
+        ]
+        .concat();
+        assert!(matches!(
+            Response::parse(&packet, false).unwrap(),
+            (1, Response::Connect(42))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn packet_loss_retries_and_expired_connection_is_replaced() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        let cancel = CancellationToken::new();
+        let client = UdpTrackerClient::new(cancel.clone(), None).await.unwrap();
+        let c = client.clone();
+        let task = tokio::spawn(async move {
+            c.announce_to_any(&[addr], fields(), b"/announce?auth=%2F+literal")
+                .await
+        });
+        let (connect, peer) = receive(&socket).await;
+        assert_eq!(connect.len(), 16);
+        reply(&socket, &connect, peer, &11u64.to_be_bytes()).await;
+        let (first, peer) = receive(&socket).await;
+        assert_eq!(&first[..8], &11u64.to_be_bytes());
+        assert_eq!(
+            &first[98..],
+            [&[2, 26][..], b"/announce?auth=%2F+literal"].concat()
+        );
+        for delay in [15, 30] {
+            tokio::time::advance(Duration::from_secs(delay - 1)).await;
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                socket.try_recv_from(&mut [0; 8192]).is_err(),
+                "retry arrived too early"
+            );
+            tokio::time::advance(Duration::from_secs(1)).await;
+            let (retry, _) = receive(&socket).await;
+            assert_eq!(
+                u32::from_be_bytes(retry[8..12].try_into().unwrap()),
+                ACTION_ANNOUNCE
+            );
+            assert_eq!(&retry[..8], &11u64.to_be_bytes());
+            assert_eq!(&retry[16..], &first[16..]);
+        }
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let (renew, peer2) = receive(&socket).await;
+        assert_eq!(peer, peer2);
+        assert_eq!(renew.len(), 16);
+        reply(&socket, &renew, peer, &22u64.to_be_bytes()).await;
+        let (last, peer) = receive(&socket).await;
+        assert_eq!(&last[..8], &22u64.to_be_bytes());
+        reply(
+            &socket,
+            &last,
+            peer,
+            &[&60u32.to_be_bytes()[..], &[0; 8]].concat(),
+        )
+        .await;
+        assert_eq!(task.await.unwrap().unwrap().interval, 60);
+        assert!(client.state.locked.read().transactions.is_empty());
+        cancel.cancel();
+    }
+    #[tokio::test(start_paused = true)]
+    async fn unreachable_first_address_uses_next_and_cancellation_releases_reservations() {
+        let blackhole = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
+        let good = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addresses = [blackhole.local_addr().unwrap(), good.local_addr().unwrap()];
+        let cancel = CancellationToken::new();
+        let client = UdpTrackerClient::new(cancel.clone(), None).await.unwrap();
+        let c = client.clone();
+        let task =
+            tokio::spawn(async move { c.announce_to_any(&addresses, fields(), b"/route").await });
+        receive(&blackhole).await;
+        tokio::time::advance(Duration::from_secs(15)).await;
+        let (connect, peer) = receive(&good).await;
+        reply(&good, &connect, peer, &7u64.to_be_bytes()).await;
+        let (announce, peer) = receive(&good).await;
+        reply(
+            &good,
+            &announce,
+            peer,
+            &[&60u32.to_be_bytes()[..], &[0; 8]].concat(),
+        )
+        .await;
+        task.await.unwrap().unwrap();
+        let c = client.clone();
+        let addr = blackhole.local_addr().unwrap();
+        let pending = tokio::spawn(async move { c.announce(addr, fields()).await });
+        receive(&blackhole).await;
+        assert!(!client.state.locked.read().transactions.is_empty());
+        cancel.cancel();
+        assert!(pending.await.unwrap().is_err());
+        assert!(client.state.locked.read().transactions.is_empty());
     }
 }

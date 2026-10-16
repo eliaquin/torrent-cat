@@ -11,8 +11,8 @@ Las referencias de líneas de la auditoría describen el commit base, no el cód
 | F3 — límites de entradas | Integrado en `4c970bd` y publicado | Parser, cuerpos HTTP, URL y tracker locales |
 | F4 — integridad y durabilidad de reanudación | Integrado en `0b5d79c` y publicado | Hash completo, checkpoints y recheck manual |
 | F5 — capacidad, cancelación y equidad de subida | Integrado en `a63b626` y publicado | Colas acotadas y peer loopback |
-| F6 — niveles y failover de trackers | Implementado, revisado y validado | Niveles, promoción y barrera privada |
-| F7 — recuperación y URLData UDP | Pendiente | |
+| F6 — niveles y failover de trackers | Integrado en `6a91e4e` y publicado | Niveles, promoción y barrera privada |
+| F7 — recuperación y URLData UDP | Implementado, revisado y validado | Reloj simulado, UDP IPv4/IPv6 y ruta/query |
 | F8 — extensiones y PEX | Pendiente | |
 | F9 — ciclo de vida y persistencia | Pendiente | |
 | F10 — contabilidad de escrituras parciales | Pendiente | |
@@ -85,3 +85,13 @@ Antes de anunciar a otro tracker privado, la corriente de descubrimiento drena l
 Self-review: se separó la referencia del consumidor a estadísticas de la referencia al emisor, evitando que una referencia circular mantuviera abierta la corriente al terminar el worker. Se verificó el registro de tareas bajo el mismo lock que cierra admisión, y se añadieron generaciones a los reintentos y a los peers que esperan un permiso. El parser distingue la ausencia de `announce-list` de una lista presente vacía, sin volver a `announce`. El crate de tracker declara sus propias features Tokio de pruebas, para que sus pruebas HTTP funcionen independientemente del workspace.
 
 Validación: 36 pruebas del motor pasan (3 ignoradas, 5 E2E excluidas), 12 de tracker pasan (1 pública ignorada) y la suite de aplicación/integración pasa. Casos: prioridad entre niveles, promoción dentro de un nivel, deduplicación, preservación del metainfo, rechazo de trackers globales privados, desconexión TCP anterior, descarte de peers pendientes con límite de una conexión, conexión al nuevo peer y ausencia de failback mientras el respaldo funciona. Una prueba con barrera detenida confirma cero anuncios al respaldo hasta liberarla; un error inyectado impide el cambio. Clippy con `-D warnings` y revisión del diff pasan. Referencias: [BEP 12](https://www.bittorrent.org/beps/bep_0012.html), [BEP 27](https://www.bittorrent.org/beps/bep_0027.html).
+
+## F7: recuperación de UDP y URLData
+
+Los intercambios UDP usan 15 × 2ⁿ segundos, con n de 0 a 8 y un presupuesto finito de nueve intentos. Antes de reenviar un announce se comprueba la edad del connection ID: a los 60 s se obtiene otro. Se prueban en turno hasta ocho direcciones DNS distintas, con DNS limitado a 5 s; las IP literales se usan directamente. Cada intercambio reserva un ID nuevo, por lo que respuestas tardías de intentos anteriores quedan descartadas. Una sesión cancelada libera sus reservas inmediatamente. El límite exterior de 10 s queda reservado a HTTP; UDP dispone del tiempo de su política de recuperación. Pause/remove/shutdown conservan sus plazos cortos para stopped, sin esperar todo ese presupuesto.
+
+Los anuncios incluyen URLData de BEP 41: ruta + query codificadas tal como aparecen en la URL, fragmentadas en opciones de hasta 255 bytes y limitadas a 4 KiB en total. Nunca se reintenta retirando la autenticación. Los errores de tracker se ocultan en los diagnósticos. Un connect admite campos adicionales después del encabezado conocido.
+
+Self-review: se distinguió un rechazo explícito del tracker de la pérdida de paquetes, evitando una ráfaga de nueve solicitudes ante un rechazo. Los errores de envío esperan antes de volver a probar. Se añadió cancelación al cliente UDP y se corrigió el lookup de URLs IPv6 con corchetes. Los límites DNS y URLData acotan el trabajo por solicitud. El coste de la política completa es que un tracker silencioso puede tardar mucho en declararse fallido; las acciones del usuario siguen siendo cancelables.
+
+Validación: pruebas con reloj Tokio simulado comprueban instantes exactos, pérdida de connect/announce, renovación a los 60 s, agotamiento de los nueve intentos, fallback IPv6→IPv4, respuestas IPv6, cancelación y rechazo sin ráfagas. URLData cubre 0/1/254/255/256/510/4.096 bytes y rechazo de 4.097; el tracker UDP local verifica la ruta/query original en anuncios reales. 19 pruebas del crate de tracker pasan (1 pública ignorada); 11 pruebas de integración de trackers pasan. Clippy con `-D warnings` pasa. Referencias: [BEP 15](https://www.bittorrent.org/beps/bep_0015.html) y [BEP 41](https://www.bittorrent.org/beps/bep_0041.html), cuya extensión sigue publicada como Draft.

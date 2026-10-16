@@ -244,7 +244,7 @@ impl TrackerComms {
                 state.attempted = true;
                 let result = tokio::select! {
                     _ = self.cancel.cancelled() => break 'monitor,
-                    r = timeout(Duration::from_secs(10), self.request(&url, event, state.tracker_id.as_deref())) => r.unwrap_or_else(|_| Err(anyhow::anyhow!("tracker request timed out"))),
+                    r = timeout(if url.scheme() == "udp" { Duration::from_secs(16000) } else { Duration::from_secs(10) }, self.request(&url, event, state.tracker_id.as_deref())) => r.unwrap_or_else(|_| Err(anyhow::anyhow!("tracker request timed out"))),
                 }.and_then(|reply| {
                     let deadline = checked_deadline(reply.interval, self.force_tracker_interval)?;
                     Ok((reply, deadline))
@@ -302,16 +302,16 @@ impl TrackerComms {
     ) -> anyhow::Result<Reply> {
         let stats = self.stats.get();
         if url.scheme() == "udp" {
-            let host = url.host_str().context("tracker has no host")?;
-            let port = url.port().context("UDP tracker has no port")?;
-            let addr = tokio::net::lookup_host((host, port))
-                .await?
-                .next()
-                .context("tracker has no addresses")?;
+            let addresses = resolve_udp_addresses(url).await?;
+            let mut url_data = url.path().as_bytes().to_vec();
+            if let Some(query) = url.query() {
+                url_data.push(b'?');
+                url_data.extend_from_slice(query.as_bytes());
+            }
             let response = self
                 .udp_client
-                .announce(
-                    addr,
+                .announce_to_any(
+                    &addresses,
                     udp::AnnounceFields {
                         info_hash: self.info_hash,
                         peer_id: self.peer_id,
@@ -327,6 +327,7 @@ impl TrackerComms {
                             Event::Update => udp::EVENT_NONE,
                         },
                     },
+                    &url_data,
                 )
                 .await
                 .map_err(|_| anyhow::anyhow!("UDP tracker request failed"))?;
@@ -403,6 +404,26 @@ impl TrackerComms {
     }
 }
 
+async fn resolve_udp_addresses(url: &Url) -> anyhow::Result<Vec<SocketAddr>> {
+    let port = url.port().context("UDP tracker has no port")?;
+    Ok(match url.host().context("UDP tracker has no host")? {
+        url::Host::Ipv4(ip) => vec![SocketAddr::new(ip.into(), port)],
+        url::Host::Ipv6(ip) => vec![SocketAddr::new(ip.into(), port)],
+        url::Host::Domain(host) => {
+            let mut seen = std::collections::HashSet::new();
+            timeout(
+                Duration::from_secs(5),
+                tokio::net::lookup_host((host, port)),
+            )
+            .await
+            .context("UDP tracker DNS timeout")??
+            .filter(|addr| seen.insert(*addr))
+            .take(8)
+            .collect()
+        }
+    })
+}
+
 fn checked_deadline(interval: Duration, forced: Option<Duration>) -> anyhow::Result<Instant> {
     Instant::now()
         .checked_add(forced.unwrap_or(interval).max(interval))
@@ -412,6 +433,20 @@ fn checked_deadline(interval: Duration, forced: Option<Duration>) -> anyhow::Res
 #[cfg(test)]
 mod interval_tests {
     use super::*;
+    #[tokio::test]
+    async fn ipv6_url_literals_do_not_go_through_bracketed_dns_lookup() {
+        for (url, expected) in [
+            ("udp://[::1]:1234/announce", "[::1]:1234"),
+            ("udp://127.0.0.1:1234/announce", "127.0.0.1:1234"),
+        ] {
+            assert_eq!(
+                resolve_udp_addresses(&Url::parse(url).unwrap())
+                    .await
+                    .unwrap(),
+                vec![expected.parse::<SocketAddr>().unwrap()]
+            );
+        }
+    }
     #[test]
     fn extreme_intervals_are_recoverable_and_minimum_is_preserved() {
         assert!(checked_deadline(Duration::from_secs(u64::MAX), None).is_err());

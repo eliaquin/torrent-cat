@@ -106,7 +106,10 @@ impl Tracker {
     }
     async fn udp() -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("udp://{}/announce", socket.local_addr().unwrap());
+        let url = format!(
+            "udp://{}/announce?auth=local%2Ffixture",
+            socket.local_addr().unwrap()
+        );
         let state = Arc::new(Mutex::new(TrackerState::default()));
         let saved = state.clone();
         let task = tokio::spawn(async move {
@@ -144,6 +147,15 @@ impl Tracker {
                         "key".into(),
                         u32::from_be_bytes(buffer[88..92].try_into().unwrap()).to_string(),
                     );
+                    let mut route = Vec::new();
+                    let mut offset = 98;
+                    while offset < len {
+                        assert_eq!(buffer[offset], 2);
+                        let n = buffer[offset + 1] as usize;
+                        route.extend_from_slice(&buffer[offset + 2..offset + 2 + n]);
+                        offset += n + 2;
+                    }
+                    query.insert("url_data".into(), String::from_utf8(route).unwrap());
                     let mut saved = saved.lock().unwrap();
                     saved.requests.push(Announce {
                         at: Instant::now(),
@@ -399,6 +411,14 @@ async fn transfer_accounting(udp: bool) {
             .is_err(),
         "private torrent contacted an initial peer"
     );
+    if udp {
+        assert!(
+            tracker
+                .records()
+                .iter()
+                .all(|r| r.query["url_data"] == "/announce?auth=local%2Ffixture")
+        );
+    }
     if !udp {
         assert_private_extensions(&seed, &seeder).await;
     }
