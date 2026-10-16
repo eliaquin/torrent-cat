@@ -191,7 +191,6 @@ impl TrackerComms {
         let mut states = std::collections::HashMap::<Url, AnnounceState>::new();
         let mut active: Option<Url> = None;
         let mut peers_published = false;
-        let initially_complete = self.stats.get().is_completed();
         let has_alternatives = tiers.iter().map(Vec::len).sum::<usize>() > 1;
         let mut next = Instant::now();
         let mut retry = Duration::from_secs(10);
@@ -251,11 +250,11 @@ impl TrackerComms {
                     }
                 }
                 active = Some(url.clone());
-                let state = states.entry(url.clone()).or_insert_with(|| AnnounceState {
-                    completed: initially_complete,
-                    ..Default::default()
-                });
+                let state = states.entry(url.clone()).or_default();
                 let event = if !state.started {
+                    // A tracker first contacted as a seed must not receive a
+                    // completion that happened before this announce session.
+                    state.completed = self.stats.get().is_completed();
                     Event::Started
                 } else if !state.completed && self.stats.get().is_completed() {
                     Event::Completed
@@ -520,6 +519,7 @@ mod failover_tests {
         url: Url,
         reject: Arc<AtomicBool>,
         requests: Arc<AtomicUsize>,
+        events: Arc<std::sync::Mutex<Vec<String>>>,
         task: tokio::task::JoinHandle<()>,
     }
     impl Drop for HttpTracker {
@@ -537,13 +537,19 @@ mod failover_tests {
             .unwrap();
             let reject = Arc::new(AtomicBool::new(false));
             let requests = Arc::new(AtomicUsize::new(0));
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = events.clone();
             let r = reject.clone();
             let n = requests.clone();
             let task = tokio::spawn(async move {
                 loop {
                     let (mut peer, _) = listener.accept().await.unwrap();
                     let mut buf = [0; 8192];
-                    let _ = peer.read(&mut buf).await;
+                    let len = peer.read(&mut buf).await.unwrap_or(0);
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buf[..len]).into_owned());
                     n.fetch_add(1, Ordering::SeqCst);
                     let status = if r.load(Ordering::SeqCst) {
                         "503 Unavailable"
@@ -562,6 +568,7 @@ mod failover_tests {
                 url,
                 reject,
                 requests,
+                events,
                 task,
             }
         }
@@ -591,6 +598,70 @@ mod failover_tests {
             })
         }
     }
+    #[tokio::test]
+    async fn tracker_first_contacted_after_completion_receives_no_completed_event() {
+        struct CompletesOnSwitch(Arc<AtomicBool>);
+        impl TorrentStatsProvider for CompletesOnSwitch {
+            fn get(&self) -> TrackerCommsStats {
+                TrackerCommsStats {
+                    total_bytes: 1,
+                    left_bytes: u64::from(!self.0.load(Ordering::SeqCst)),
+                    ..Default::default()
+                }
+            }
+            fn is_private(&self) -> bool {
+                true
+            }
+            fn disconnect_for_tracker_switch(&self) -> BoxFuture<'_, anyhow::Result<()>> {
+                Box::pin(async {
+                    self.0.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+            }
+        }
+        let a = HttpTracker::new().await;
+        let b = HttpTracker::new().await;
+        a.reject.store(true, Ordering::SeqCst);
+        let cancel = CancellationToken::new();
+        let tasks = TaskTracker::new();
+        let udp = UdpTrackerClient::new(cancel.clone(), None).await.unwrap();
+        let mut stream = TrackerComms::start(
+            Id20::default(),
+            Id20::default(),
+            vec![vec![a.url.clone()], vec![b.url.clone()]],
+            Box::new(CompletesOnSwitch(Arc::new(AtomicBool::new(false)))),
+            None,
+            1234,
+            reqwest::Client::new(),
+            udp,
+            tasks.clone(),
+        )
+        .unwrap();
+        let consumer = tokio::spawn(async move { while stream.next().await.is_some() {} });
+        timeout(Duration::from_secs(4), async {
+            while b.requests.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        consumer.abort();
+        let _ = consumer.await;
+        tasks.close();
+        tasks.wait().await;
+        cancel.cancel();
+        let events = b.events.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|s| s.contains("event=started"))
+                .count(),
+            1
+        );
+        assert!(!events.iter().any(|s| s.contains("event=completed")));
+        assert!(events.iter().any(|s| s.contains("event=stopped")));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn silent_udp_yields_to_http_tier_and_is_not_retried_each_interval() {
         let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();

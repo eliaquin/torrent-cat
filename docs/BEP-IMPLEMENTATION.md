@@ -207,3 +207,8 @@ Una regresión con reloj simulado, UDP silencioso en primer nivel y HTTP funcion
 La resolución conserva el orden de `tr` y puede pasar al siguiente tracker mientras ningún tracker haya publicado un peer. Sigue finalizando el tracker previo antes de cambiar. Una vez encolado el primer peer, exige la barrera de aislamiento anterior; sin torrent administrado, falla cerrada. No se habilitan DHT/LSD/PEX, trackers globales ni peers iniciales para hashes desconocidos. Self-review: se separó el permiso de omitir una desconexión vacía de la obligación de finalizar el tracker anterior.
 
 La regresión local completa un magnet con primer tracker HTTP 503 y segundo conectado a un seeder; comprueba el orden. El caso negativo recibe un peer, falla después el tracker y confirma cero contactos al respaldo. Pasan esa prueba, las 20 de tracker (1 ignorada) y Clippy con `-D warnings`.
+
+
+### C5: completed anterior al primer contacto — confirmado y corregido
+
+Cada nuevo `started` toma el estado de finalización actual, también al volver a un tracker anterior. Si el torrent ya estaba completo antes de ese contacto, no genera un `completed` inmediato por una transición ocurrida fuera de esa sesión de anuncios. Si termina durante el contacto, conserva el evento normal. La regresión completa el torrent en la barrera de failover y comprueba en HTTP `started`, updates y `stopped`, sin `completed` en el respaldo. Self-review y las 21 pruebas de tracker (1 pública ignorada), junto con Clippy, pasan.
