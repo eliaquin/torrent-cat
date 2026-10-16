@@ -2003,6 +2003,17 @@ impl Session {
         if handle.with_state(|s| matches!(s, ManagedTorrentState::Live(_))) {
             bail!("torrent is already live");
         }
+        // A pause may have timed out while synchronous disk work was still
+        // running. Do not report a resume until that cancelled generation exits.
+        let cancelled_check = handle.with_state(|state| {
+            matches!(state, ManagedTorrentState::Initializing(init) if init.is_pause_requested())
+        });
+        if cancelled_check {
+            self.quiesce(handle).await?;
+            if self.closing.is_cancelled() {
+                bail!("session is stopping");
+            }
+        }
         self.wait_for_tracker_stop(handle.info_hash()).await?;
         let peer_rx = self.make_peer_rx_managed_torrent(handle, true);
         handle.start(peer_rx, false)?;
@@ -2364,6 +2375,40 @@ mod tests {
             timeout(Duration::from_secs(2), s.stop()).await.unwrap();
             assert!(h.live().is_none());
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resume_after_pause_timeout_waits_for_cancelled_check_ownership() {
+        let (_root, s) = initialization_fixture().await;
+        let barrier = s.concurrent_initialize_semaphore.acquire().await.unwrap();
+        let h = waiting_torrent(&s).await;
+        s.pause(&h).await.unwrap();
+        let init = h.with_state(|state| match state {
+            crate::ManagedTorrentState::Initializing(init) => init.clone(),
+            _ => panic!("expected waiting initialization"),
+        });
+        // Model non-cancellable disk work holding both ownership and its task
+        // registration beyond the pause deadline. No wall-clock sleep required.
+        let guard = init.start_check(None).unwrap();
+        let task = h.shared.transfer_tasks.token();
+        assert!(s.pause(&h).await.is_err());
+        assert!(h.is_paused());
+        let session = s.clone();
+        let handle = h.clone();
+        let resume = tokio::spawn(async move { session.unpause(&handle).await });
+        tokio::task::yield_now().await;
+        assert!(!resume.is_finished());
+        assert!(
+            h.is_paused(),
+            "resume must not publish intent before the old check exits"
+        );
+        drop(guard);
+        drop(task);
+        drop(barrier);
+        resume.await.unwrap().unwrap();
+        h.wait_until_initialized().await.unwrap();
+        assert!(h.live().is_some());
+        s.stop().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
