@@ -8,10 +8,7 @@ use librqbit_core::hash_id::Id20;
 use librqbit_core::lengths::{ChunkInfo, ValidPieceIndex};
 use peer_binary_protocol::{Message, Request};
 
-use tokio::sync::{
-    Notify,
-    mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
-};
+use tokio::sync::Notify;
 use tracing::debug;
 
 use crate::peer_connection::WriterRequest;
@@ -21,8 +18,8 @@ use crate::type_aliases::BF;
 use super::PeerStates;
 
 pub(crate) type InflightRequest = ChunkInfo;
-pub(crate) type PeerRx = UnboundedReceiver<WriterRequest>;
-pub(crate) type PeerTx = UnboundedSender<WriterRequest>;
+pub(crate) type PeerRx = tokio::sync::mpsc::Receiver<WriterRequest>;
+pub(crate) type PeerTx = crate::peer_connection::WriterSender;
 
 #[derive(Debug)]
 pub(crate) struct Peer {
@@ -191,7 +188,7 @@ impl Peer {
     pub fn idle_to_connecting(&mut self, counters: &PeerStates) -> Option<(PeerRx, PeerTx)> {
         match &self.state {
             PeerState::Queued | PeerState::NotNeeded => {
-                let (tx, rx) = unbounded_channel();
+                let (tx, rx) = crate::peer_connection::writer_channel();
                 let tx_2 = tx.clone();
                 self.set_state(PeerState::Connecting(tx), counters);
                 Some((rx, tx_2))

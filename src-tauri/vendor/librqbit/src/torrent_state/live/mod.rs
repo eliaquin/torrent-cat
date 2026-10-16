@@ -216,10 +216,9 @@ pub struct TorrentStateLive {
     pub(crate) streams: Arc<TorrentStreams>,
     have_broadcast_tx: tokio::sync::broadcast::Sender<ValidPieceIndex>,
 
-    ratelimit_upload_tx: tokio::sync::mpsc::UnboundedSender<(
-        tokio::sync::mpsc::UnboundedSender<WriterRequest>,
-        ChunkInfo,
-    )>,
+    ratelimit_upload_tx:
+        tokio::sync::mpsc::Sender<(SocketAddr, PeerTx, crate::upload_queue::UploadRequest)>,
+    upload_slots: Arc<Semaphore>,
     ratelimits: Limits,
 }
 
@@ -259,10 +258,8 @@ impl TorrentStateLive {
 
         let (have_broadcast_tx, _) = tokio::sync::broadcast::channel(128);
 
-        let (ratelimit_upload_tx, ratelimit_upload_rx) = tokio::sync::mpsc::unbounded_channel::<(
-            tokio::sync::mpsc::UnboundedSender<WriterRequest>,
-            ChunkInfo,
-        )>();
+        let (ratelimit_upload_tx, ratelimit_upload_rx) =
+            tokio::sync::mpsc::channel(crate::upload_queue::SESSION_REQUESTS);
         let ratelimits = Limits::new(paused.shared.options.ratelimits);
 
         let state = Arc::new(TorrentStateLive {
@@ -302,6 +299,7 @@ impl TorrentStateLive {
                 .map(|_| RwLock::new(()))
                 .collect(),
             ratelimit_upload_tx,
+            upload_slots: session.upload_slots.clone(),
             ratelimits,
         });
 
@@ -377,7 +375,7 @@ impl TorrentStateLive {
         checked_peer: CheckedIncomingConnection,
     ) -> anyhow::Result<AddIncomingPeerResult> {
         use dashmap::mapref::entry::Entry;
-        let (tx, rx) = unbounded_channel();
+        let (tx, rx) = crate::peer_connection::writer_channel();
         let permit = match self.peer_semaphore.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -447,31 +445,43 @@ impl TorrentStateLive {
 
     async fn task_upload_scheduler(
         self: Arc<Self>,
-        mut rx: tokio::sync::mpsc::UnboundedReceiver<(
-            tokio::sync::mpsc::UnboundedSender<WriterRequest>,
-            ChunkInfo,
+        mut rx: tokio::sync::mpsc::Receiver<(
+            SocketAddr,
+            PeerTx,
+            crate::upload_queue::UploadRequest,
         )>,
     ) -> crate::Result<()> {
-        while let Some((tx, ci)) = rx.recv().await {
-            tokio::select! {
-                _ = tx.closed() => {
-                    continue;
-                }
-                res = self.ratelimits.prepare_for_upload(NonZeroU32::new(ci.size).unwrap()) => {
-                    res?;
-                }
-            };
-            if let Some(session) = self.shared.session.upgrade() {
-                tokio::select! {
-                    _ = tx.closed() => {
+        let mut fair = crate::upload_queue::FairQueue::default();
+        loop {
+            while let Ok((addr, tx, request)) = rx.try_recv() {
+                fair.push(addr, (tx, request));
+            }
+            let (tx, request) = match fair.pop() {
+                Some(job) => job,
+                None => match rx.recv().await {
+                    Some((addr, tx, request)) => {
+                        fair.push(addr, (tx, request));
                         continue;
                     }
-                    res = session.ratelimits.prepare_for_upload(NonZeroU32::new(ci.size).unwrap()) => {
-                        res?;
-                    }
+                    None => break,
+                },
+            };
+            if request.cancel.is_cancelled() {
+                continue;
+            }
+            tokio::select! {
+                _ = tx.closed() => continue,
+                _ = request.cancel.cancelled() => continue,
+                res = self.ratelimits.prepare_for_upload(NonZeroU32::new(request.chunk.size).unwrap()) => { res?; }
+            }
+            if let Some(session) = self.shared.session.upgrade() {
+                tokio::select! {
+                    _ = tx.closed() => continue,
+                    _ = request.cancel.cancelled() => continue,
+                    res = session.ratelimits.prepare_for_upload(NonZeroU32::new(request.chunk.size).unwrap()) => { res?; }
                 }
             }
-            let _ = tx.send(WriterRequest::ReadChunkRequest(ci));
+            let _ = tx.send(WriterRequest::ReadChunkRequest(request));
         }
         Ok(())
     }
@@ -485,6 +495,7 @@ impl TorrentStateLive {
         permit: OwnedSemaphorePermit,
     ) -> crate::Result<()> {
         let handler = PeerHandler {
+            uploads: crate::upload_queue::PeerUploads::new(self.upload_slots.clone()),
             addr: checked_peer.addr,
             incoming: true,
             on_bitfield_notify: Default::default(),
@@ -549,6 +560,7 @@ impl TorrentStateLive {
             .ok_or(Error::BugPeerNotFound)?;
 
         let handler = PeerHandler {
+            uploads: crate::upload_queue::PeerUploads::new(state.upload_slots.clone()),
             addr,
             incoming: false,
             on_bitfield_notify: Default::default(),
@@ -1024,6 +1036,7 @@ impl Default for PeerFlowControl {
 // All peer state that would never be used by other actors should pe put here.
 // This state tracks a live peer.
 struct PeerHandler {
+    uploads: Arc<crate::upload_queue::PeerUploads>,
     state: Arc<TorrentStateLive>,
     counters: Arc<AtomicPeerCounters>,
     // Semantically, we don't need a lock here, as this is only requested from
@@ -1046,6 +1059,12 @@ struct PeerHandler {
     cancel_token: CancellationToken,
 
     client_name_and_version: String,
+}
+
+impl Drop for PeerHandler {
+    fn drop(&mut self) {
+        self.uploads.set_interested(false);
+    }
 }
 
 impl PeerConnectionHandler for &'_ PeerHandler {
@@ -1078,7 +1097,7 @@ impl PeerConnectionHandler for &'_ PeerHandler {
                 .context("on_bitfield")?,
             Message::Choke => self.on_i_am_choked(),
             Message::Unchoke => self.on_i_am_unchoked(),
-            Message::Interested => self.on_peer_interested(),
+            Message::Interested => self.on_peer_interested(true)?,
             Message::Piece(piece) => self
                 .on_received_piece(piece)
                 .await
@@ -1087,11 +1106,17 @@ impl PeerConnectionHandler for &'_ PeerHandler {
                 trace!("keepalive received");
             }
             Message::Have(h) => self.on_have(h),
-            Message::NotInterested => {
-                trace!("received \"not interested\", but we don't process it yet")
-            }
-            Message::Cancel(_) => {
-                trace!("received \"cancel\", but we don't process it yet")
+            Message::NotInterested => self.on_peer_interested(false)?,
+            Message::Cancel(request) => {
+                if let Some(piece) = self.state.lengths.validate_piece_index(request.index)
+                    && let Some(chunk) = self.state.lengths.chunk_info_from_received_data(
+                        piece,
+                        request.begin,
+                        request.length,
+                    )
+                {
+                    self.uploads.cancel(&chunk);
+                }
             }
             Message::Extended(ExtendedMessage::UtMetadata(UtMetadata::Request(
                 metadata_piece_id,
@@ -1252,6 +1277,7 @@ impl PeerConnectionHandler for &'_ PeerHandler {
         &self,
         handshake: &mut ExtendedHandshake<ByteBuf>,
     ) -> anyhow::Result<()> {
+        handshake.reqq = Some(crate::upload_queue::PER_PEER_REQUESTS.try_into()?);
         if self.state.metadata.info.info().private {
             handshake.m.ut_pex = Some(0);
             handshake.m.ut_metadata = Some(0);
@@ -1537,9 +1563,12 @@ impl PeerHandler {
             );
         }
 
-        self.state
-            .ratelimit_upload_tx
-            .send((self.tx.clone(), chunk_info))?;
+        if let Some(request) = self.uploads.admit(chunk_info)? {
+            self.state
+                .ratelimit_upload_tx
+                .try_send((self.addr, self.tx.clone(), request))
+                .map_err(|_| anyhow::anyhow!("upload scheduler full or closed"))?;
+        }
         Ok(())
     }
 
@@ -1773,9 +1802,17 @@ impl PeerHandler {
         self.notify_request_slots_changed();
     }
 
-    fn on_peer_interested(&self) {
-        trace!("peer is interested");
-        self.state.peers.mark_peer_interested(self.addr, true);
+    fn on_peer_interested(&self, interested: bool) -> anyhow::Result<()> {
+        self.state.peers.mark_peer_interested(self.addr, interested);
+        let interested = interested && !self.state.torrent().options.disable_upload();
+        if self.uploads.set_interested(interested) {
+            self.tx.send(WriterRequest::Message(if interested {
+                Message::Unchoke
+            } else {
+                Message::Choke
+            }))?;
+        }
+        Ok(())
     }
 
     fn on_i_am_unchoked(&self) {

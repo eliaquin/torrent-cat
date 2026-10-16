@@ -20,7 +20,6 @@ use peer_binary_protocol::{
     },
 };
 use sha1w::{ISha1, Sha1};
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::trace;
 
 use crate::{
@@ -43,7 +42,7 @@ pub(crate) async fn read_metainfo_from_peer(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel::<
         Result<(TorrentMetaV1Info<ByteBufOwned>, ByteBufOwned), bencode::DeserializeError>,
     >();
-    let (writer_tx, writer_rx) = tokio::sync::mpsc::unbounded_channel::<WriterRequest>();
+    let (writer_tx, writer_rx) = crate::peer_connection::writer_channel();
     let handler = Handler {
         addr,
         info_hash,
@@ -79,6 +78,7 @@ pub(crate) async fn read_metainfo_from_peer(
 struct HandlerLocked {
     metadata_size: u32,
     total_pieces: usize,
+    next_request: usize,
     buffer: Vec<u8>,
     received_pieces: Vec<bool>,
 }
@@ -98,6 +98,7 @@ impl HandlerLocked {
             received_pieces,
             buffer,
             total_pieces,
+            next_request: total_pieces.min(64),
         })
     }
     fn piece_size(&self, index: u32) -> usize {
@@ -153,7 +154,7 @@ pub type TorrentAndInfoBytes = (TorrentMetaV1Info<ByteBufOwned>, ByteBufOwned);
 struct Handler {
     addr: SocketAddr,
     info_hash: Id20,
-    writer_tx: UnboundedSender<WriterRequest>,
+    writer_tx: crate::peer_connection::WriterSender,
     result_tx: Mutex<
         Option<
             tokio::sync::oneshot::Sender<Result<TorrentAndInfoBytes, bencode::DeserializeError>>,
@@ -200,6 +201,19 @@ impl PeerConnectionHandler for Handler {
                 .as_mut()
                 .unwrap()
                 .record_piece(&utdata, &self.info_hash)?;
+            if !piece_ready {
+                let mut locked = self.locked.write();
+                let inner = locked.as_mut().unwrap();
+                if inner.next_request < inner.total_pieces {
+                    self.writer_tx
+                        .send(WriterRequest::Message(Message::Extended(
+                            ExtendedMessage::UtMetadata(UtMetadata::Request(
+                                inner.next_request.try_into()?,
+                            )),
+                        )))?;
+                    inner.next_request += 1;
+                }
+            }
             if piece_ready {
                 let buf = Bytes::from(self.locked.write().take().unwrap().buffer);
                 let info = from_bytes::<TorrentMetaV1Info<ByteBuf>>(&buf)
@@ -255,7 +269,7 @@ impl PeerConnectionHandler for Handler {
 
         self.locked.write().replace(inner);
 
-        for i in 0..total_pieces {
+        for i in 0..total_pieces.min(64) {
             self.writer_tx
                 .send(WriterRequest::Message(Message::Extended(
                     ExtendedMessage::UtMetadata(UtMetadata::Request(i.try_into()?)),
@@ -270,5 +284,46 @@ impl PeerConnectionHandler for Handler {
 
     fn client_name_and_version(&self) -> &str {
         &self.client_name_and_version
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+    use peer_binary_protocol::extended::ut_metadata::UtMetadataData;
+    #[tokio::test]
+    async fn large_metadata_uses_bounded_sliding_request_window() {
+        let (tx, mut rx) = crate::peer_connection::writer_channel();
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        let handler = Handler {
+            addr: "127.0.0.1:1".parse().unwrap(),
+            info_hash: Id20::default(),
+            writer_tx: tx,
+            result_tx: Mutex::new(Some(result_tx)),
+            locked: RwLock::new(None),
+            client_name_and_version: "test".into(),
+        };
+        let mut h = ExtendedHandshake::new();
+        h.metadata_size = Some(16384 * 2048);
+        handler.on_extended_handshake(&h).unwrap();
+        assert_eq!(rx.len(), 66); // 2 controls + 64 metadata requests
+        while rx.try_recv().is_ok() {}
+        handler
+            .on_received_message(Message::Extended(ExtendedMessage::UtMetadata(
+                UtMetadata::Data(UtMetadataData::from_bytes(
+                    0,
+                    16384 * 2048,
+                    ByteBuf(&[0; 16384]),
+                )),
+            )))
+            .await
+            .unwrap();
+        match rx.try_recv().unwrap() {
+            WriterRequest::Message(Message::Extended(ExtendedMessage::UtMetadata(
+                UtMetadata::Request(64),
+            ))) => {}
+            other => panic!("unexpected refill: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
     }
 }

@@ -20,7 +20,11 @@ struct Limit {
 impl Limit {
     fn new_inner(bps: Option<NonZeroU32>) -> Option<Arc<RateLimiter>> {
         let bps = bps?;
-        Some(Arc::new(RateLimiter::direct(Quota::per_second(bps))))
+        Some(Arc::new(RateLimiter::direct(
+            Quota::per_second(bps).allow_burst(
+                NonZeroU32::new(bps.get().max(librqbit_core::constants::CHUNK_SIZE)).unwrap(),
+            ),
+        )))
     }
 
     fn new(bps: Option<NonZeroU32>) -> Self {
@@ -95,5 +99,21 @@ impl Limits {
             upload_bps: self.get_upload_bps(),
             download_bps: self.get_download_bps(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn low_rate_accepts_one_block_then_waits_without_capacity_error() {
+        let limit = Limit::new(NonZeroU32::new(1));
+        let block = NonZeroU32::new(librqbit_core::constants::CHUNK_SIZE).unwrap();
+        limit.acquire(block).await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), limit.acquire(block))
+                .await
+                .is_err()
+        );
     }
 }
