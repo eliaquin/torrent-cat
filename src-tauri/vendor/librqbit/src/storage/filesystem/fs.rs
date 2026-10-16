@@ -1,11 +1,11 @@
 use std::{
-    fs::OpenOptions,
     io::IoSlice,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::Context;
-use tracing::warn;
+use cap_std::fs::{Dir, OpenOptions};
 
 use crate::{
     storage::{StorageFactoryExt, filesystem::opened_file::OurFileExt},
@@ -29,6 +29,7 @@ impl StorageFactory for FilesystemStorageFactory {
     ) -> anyhow::Result<FilesystemStorage> {
         Ok(FilesystemStorage {
             output_folder: shared.options.output_folder.clone(),
+            root: Arc::new(open_root(&shared.options.output_folder)?),
             opened_files: Default::default(),
         })
     }
@@ -40,7 +41,33 @@ impl StorageFactory for FilesystemStorageFactory {
 
 pub struct FilesystemStorage {
     pub(crate) output_folder: PathBuf,
+    // Keep the authority granted at creation. Never resolve torrent paths through
+    // the ambient filesystem again, including after the folder is renamed.
+    root: Arc<Dir>,
     pub(crate) opened_files: Vec<OpenedFile>,
+}
+
+fn open_root(path: &Path) -> anyhow::Result<Dir> {
+    // The caller chooses this ambient root. All untrusted torrent paths below it
+    // are resolved by cap-std, which confines even symlink traversal to this fd.
+    // Strip trailing separators / `.` so O_NOFOLLOW applies to the actual
+    // final directory rather than a synthetic trailing component.
+    let path: PathBuf = path.components().collect();
+    std::fs::create_dir_all(&path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+            .open(&path)
+            .context("download root must be a directory, not a symbolic link")?;
+        Ok(Dir::from_std_file(file))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Dir::open_ambient_dir(&path, cap_std::ambient_authority())?)
+    }
 }
 
 impl FilesystemStorage {
@@ -53,6 +80,7 @@ impl FilesystemStorage {
                 .map(|f| f.take_clone())
                 .collect::<anyhow::Result<Vec<_>>>()?,
             output_folder: self.output_folder.clone(),
+            root: self.root.clone(),
         })
     }
 }
@@ -88,7 +116,7 @@ impl TorrentStorage for FilesystemStorage {
     }
 
     fn remove_file(&self, _file_id: usize, filename: &Path) -> anyhow::Result<()> {
-        Ok(std::fs::remove_file(self.output_folder.join(filename))?)
+        Ok(self.root.remove_file(filename)?)
     }
 
     fn ensure_file_length(&self, file_id: usize, len: u64) -> anyhow::Result<()> {
@@ -106,19 +134,20 @@ impl TorrentStorage for FilesystemStorage {
                 .map(|f| f.take_clone())
                 .collect::<anyhow::Result<Vec<_>>>()?,
             output_folder: self.output_folder.clone(),
+            root: self.root.clone(),
         }))
     }
 
     fn remove_directory_if_empty(&self, path: &Path) -> anyhow::Result<()> {
-        let path = self.output_folder.join(path);
-        if !path.is_dir() {
-            anyhow::bail!("cannot remove dir: {path:?} is not a directory")
+        if path.as_os_str().is_empty() {
+            // Do not re-resolve and delete the ambient root: it may now name a
+            // different directory. Torrent-owned descendants are removed below.
+            return Ok(());
         }
-        if std::fs::read_dir(&path)?.count() == 0 {
-            std::fs::remove_dir(&path).with_context(|| format!("error removing {path:?}"))
-        } else {
-            warn!("did not remove {path:?} as it was not empty");
-            Ok(())
+        match self.root.remove_dir(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("error removing {path:?}")),
         }
     }
 
@@ -137,30 +166,28 @@ impl TorrentStorage for FilesystemStorage {
                 files.push(OpenedFile::new_dummy());
                 continue;
             };
-            std::fs::create_dir_all(full_path.parent().context("bug: no parent")?)?;
-            let f = if shared.options.allow_overwrite {
-                OpenOptions::new()
-                    .create(true)
-                    .truncate(false)
-                    .read(true)
-                    .write(true)
-                    .open(&full_path)
-                    .with_context(|| format!("error opening {full_path:?} in read/write mode"))?
+            let parent = relative_path.parent().context("bug: no parent")?;
+            if !parent.as_os_str().is_empty() {
+                self.root.create_dir_all(parent)?;
+            }
+            let mut options = OpenOptions::new();
+            options.read(true).write(true);
+            if shared.options.allow_overwrite {
+                options.create(true);
             } else {
-                // create_new does not seem to work with read(true), so calling this twice.
-                OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .open(&full_path)
-                    .with_context(|| {
-                        format!(
-                            "error creating a new file (because allow_overwrite = false) {:?}",
-                            full_path
-                        )
-                    })?;
-                OpenOptions::new().read(true).write(true).open(&full_path)?
-            };
-            files.push(OpenedFile::new(full_path.clone(), f));
+                options.create_new(true);
+            }
+            let f = self
+                .root
+                .open_with(relative_path, &options)
+                .with_context(|| {
+                    format!("error opening confined torrent file {relative_path:?}")
+                })?;
+            anyhow::ensure!(
+                f.metadata()?.is_file(),
+                "torrent path is not a regular file"
+            );
+            files.push(OpenedFile::new(full_path, f.into_std()));
         }
 
         self.opened_files = files;

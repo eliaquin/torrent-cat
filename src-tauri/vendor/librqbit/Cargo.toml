@@ -224,6 +224,9 @@ default-features = false
 version = "0.30"
 features = ["uio"]
 
+[dependencies.cap-std]
+version = "4.0.3"
+
 [dependencies.notify]
 version = "8"
 optional = true
