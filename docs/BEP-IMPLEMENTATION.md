@@ -19,8 +19,8 @@ Las referencias de líneas de la auditoría describen el commit base, no el cód
 | F11 — recuperación de metadata persistida | Integrado en `cd72889` y publicado | Entradas visibles, reparación por hash y cero descubrimiento |
 | F12 — pausa y borrado durante inicialización | Integrado en `beef272` y publicado | Barrera de permisos, cancelación y stream de peers |
 | F13 — límites al servir metadata | Integrado en `29932f9` y publicado | Índices extremos, bloques alineados y peer TCP |
-| F14 — secuencia al recibir metadata | Implementado, revisado y validado | Negociación incremental y peers adverso/válido |
-| F15 — buffers para mapas de piezas | Pendiente | |
+| F14 — secuencia al recibir metadata | Integrado en `396c54c` y publicado | Negociación incremental y peers adverso/válido |
+| F15 — buffers para mapas de piezas | Implementado, revisado y validado | TCP grande, fragmentación y límites antes de reservar |
 
 ## F1: confinamiento de almacenamiento
 
@@ -161,3 +161,12 @@ Self-review: además de corregir `>` por un límite exclusivo, se eliminó la mu
 El lector mantiene capacidad, tamaño, descarga y resultado entregado como estado explícito. Un `Data` antes de negociar produce un error del peer, sin unwrap; el resolver continúa con otros peers. Los campos de handshake pueden llegar en actualizaciones separadas. Repetirlos no reinicia piezas ni solicitudes; cero desactiva la capacidad y descarta ese peer. Se rechazan tamaño cero/excesivo/cambiante, total_size inconsistente, piezas no solicitadas y duplicadas. Las peticiones recibidas mientras falta metadata verificada reciben reject; no se envían Unchoke/Interested innecesarios para obtener metadata.
 
 Self-review: se conserva una única ventana de 64 solicitudes, y el hash completo sigue siendo obligatorio antes de entregar el resultado. El tamaño declarado en cada bloque se contrasta con el negociado. Los errores de parseo no vuelcan el contenido en la nueva ruta. Validación: 46 pruebas del motor pasan (3 ignoradas, 5 E2E excluidas), suite de aplicación/integración y Clippy con `-D warnings` pasan. Un test usa el resolver real con dos peers TCP: el primero envía Data antes del handshake extendido; se espera su desconexión antes de que el segundo entregue metadata válida y complete la misma resolución. Pruebas adicionales cubren campos separados, 100 handshakes repetidos, desactivación, tamaños y duplicados. Referencia: [BEP 9](https://www.bittorrent.org/beps/bep_0009.html).
+
+
+## F15: mapas de piezas dimensionados y límites por mensaje
+
+La escritura reserva el bitfield según el número validado de piezas y libera ese buffer después de enviarlo. La lectura conserva un ring buffer que crece únicamente tras validar tipo y longitud del encabezado. Para torrents conocidos, el tamaño debe coincidir exactamente; durante resolución desconocida existe un máximo de 209.716 bytes, derivado del límite de metainfo de 32 MiB y los hashes SHA-1. Los bloques conservan 16 KiB de payload; las extensiones tienen un límite independiente de 32 KiB por trama y los controles no amplían el buffer.
+
+Self-review: el control de tamaño ocurre después de cada lectura, evitando que una cabecera fragmentada ordene leer todo su tamaño antes de validarla. El crecimiento conserva las dos partes del ring; los diagnósticos usan usize para no truncar los tamaños nuevos. La trama que sigue a un bitfield se conserva. No se aumentó indiscriminadamente el buffer fijo de bloques.
+
+Validación: 48 pruebas del motor pasan (3 ignoradas, 5 E2E excluidas); suite de aplicación/integración y Clippy con `-D warnings` pasan. Un peer TCP intercambia bitfields de 16.495/16.500/32.763/32.768/32.769 bytes; descarga la pieza que falta, verifica SHA-1/contenido y recibe una subida por la misma conexión. Son fixtures de piezas pequeñas para acotar disco, sin fingir solo la serialización. Otra prueba entrega la trama byte por byte con la cabecera cruzando el final del ring, seguida de Unchoke. Tamaños extremos/control/bloque/extensión, diferencia con metainfo y máximo absoluto se rechazan antes de crecer. Referencia: [BEP 3](https://www.bittorrent.org/beps/bep_0003.html).

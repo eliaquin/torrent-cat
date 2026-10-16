@@ -9,13 +9,15 @@ use futures::TryFutureExt;
 use peer_binary_protocol::{Handshake, Message, MessageDeserializeError};
 use tokio::io::AsyncReadExt;
 
-// This should be greater than MAX_MSG_LEN
-const BUFLEN: usize = 0x8000; // 32kb
+const BUFLEN: usize = 0x8000; // baseline for blocks and extensions
+// A v1 metainfo of at most 32 MiB cannot contain more SHA-1 piece hashes.
+pub(crate) const MAX_BITFIELD_BYTES: usize = (32usize * 1024 * 1024 / 20).div_ceil(8);
 
 /// A ringbuffer for reading bittorrent messages from socket.
 /// Messages may thus span 2 slices (notably, Piece message and UtMetadata messages), which is reflected in their contents.
 pub struct ReadBuf {
-    buf: Box<[u8; BUFLEN]>,
+    buf: Vec<u8>,
+    bitfield_bytes: Option<usize>,
     start: usize,
     len: usize,
 }
@@ -25,7 +27,7 @@ pub struct ReadBuf {
 macro_rules! advance {
     ($self:expr, $len:expr) => {
         $self.len = $self.len.saturating_sub($len);
-        $self.start = ($self.start + $len) % BUFLEN;
+        $self.start = ($self.start + $len) % $self.buf.len();
     };
 }
 
@@ -41,10 +43,67 @@ macro_rules! as_slices {
 impl ReadBuf {
     pub fn new() -> Self {
         Self {
-            buf: Box::new([0u8; BUFLEN]),
+            buf: vec![0u8; BUFLEN],
+            bitfield_bytes: None,
             start: 0,
             len: 0,
         }
+    }
+
+    pub(crate) fn set_bitfield_bytes(&mut self, bytes: Option<usize>) -> Result<()> {
+        if bytes.is_some_and(|n| n > MAX_BITFIELD_BYTES) {
+            return Err(Error::Anyhow(anyhow::anyhow!(
+                "bitfield exceeds metainfo limit"
+            )));
+        }
+        self.bitfield_bytes = bytes;
+        Ok(())
+    }
+
+    // Inspect only five bytes before deciding whether a frame may grow the
+    // buffer. A huge declared length for a control/extension never allocates it.
+    fn prepare_frame(&mut self) -> Result<()> {
+        if self.len < 5 {
+            return Ok(());
+        }
+        let byte = |n| self.buf[(self.start + n) % self.buf.len()];
+        let prefix = u32::from_be_bytes([byte(0), byte(1), byte(2), byte(3)]) as usize;
+        if prefix == 0 {
+            return Ok(());
+        }
+        let id = byte(4);
+        let total = prefix
+            .checked_add(4)
+            .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("frame size overflow")))?;
+        let limit = match id {
+            5 => {
+                if let Some(expected) = self.bitfield_bytes
+                    && prefix != expected + 1
+                {
+                    return Err(Error::Anyhow(anyhow::anyhow!(
+                        "bitfield length differs from torrent"
+                    )));
+                }
+                self.bitfield_bytes.unwrap_or(MAX_BITFIELD_BYTES) + 5
+            }
+            7 => 16384 + 13,
+            20 => BUFLEN,
+            _ => 17,
+        };
+        if total > limit {
+            return Err(Error::Anyhow(anyhow::anyhow!(
+                "peer frame length {total} exceeds limit {limit}"
+            )));
+        }
+        if total > self.buf.len() {
+            let mut grown = vec![0; total];
+            let (first, second) = as_slices!(self);
+            grown[..first.len()].copy_from_slice(first);
+            grown[first.len()..self.len].copy_from_slice(second);
+            self.buf = grown;
+            self.start = 0;
+        }
+        Ok(())
     }
 
     // Read the BT handshake.
@@ -57,7 +116,7 @@ impl ReadBuf {
         self.len = with_timeout(
             "reading",
             timeout,
-            conn.read(&mut *self.buf).map_err(Error::ReadHandshake),
+            conn.read(&mut self.buf).map_err(Error::ReadHandshake),
         )
         .await?;
         if self.len == 0 {
@@ -70,7 +129,7 @@ impl ReadBuf {
     }
 
     fn is_contiguous(&self) -> bool {
-        self.start + self.len == (self.start + self.len) % BUFLEN
+        self.start + self.len == (self.start + self.len) % self.buf.len()
     }
 
     // In rare cases, we might need to make the buffer contiguous, as the message
@@ -81,21 +140,20 @@ impl ReadBuf {
     // in the middle of bencoded data (as we only can deserialize bencode from a single slice).
     fn make_contiguous(&mut self) -> Result<()> {
         if self.is_contiguous() {
-            #[allow(clippy::cast_possible_truncation)]
             return Err(Error::BugReadBufMakeContiguous {
-                start: self.start as u16,
-                len: self.len as u16,
+                start: self.start,
+                len: self.len,
             });
         }
 
         // This should be so rare that it's not worth writing complex in-place code.
         // See the source in VecDequeue::make_contiguous to see how involved it would be
         // otherwise.
-        let mut new = [0u8; BUFLEN];
+        let mut new = vec![0u8; self.buf.len()];
         let (first, second) = as_slices!(self);
         new[..first.len()].copy_from_slice(first);
         new[first.len()..first.len() + second.len()].copy_from_slice(second);
-        *self.buf = new;
+        self.buf = new;
         self.start = 0;
         Ok(())
     }
@@ -103,10 +161,10 @@ impl ReadBuf {
     /// Convert into 2 slices (as ranges).
     fn as_slice_ranges(&self) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
         // These .min() calls are for asm to be branchless and the code panicless.
-        let len = self.len.min(BUFLEN);
-        let start = self.start.min(BUFLEN);
+        let len = self.len.min(self.buf.len());
+        let start = self.start.min(self.buf.len());
 
-        let first_len = len.min(BUFLEN - start);
+        let first_len = len.min(self.buf.len() - start);
         let first = start..start + first_len;
         let second = 0..len.saturating_sub(first_len);
         (first, second)
@@ -117,14 +175,14 @@ impl ReadBuf {
     }
 
     fn is_full(&self) -> bool {
-        self.len == BUFLEN
+        self.len == self.buf.len()
     }
 
     /// Get a part of the buffer for reading into.
     fn unfilled_ioslices(&mut self) -> [IoSliceMut<'_>; 2] {
-        let write_start = (self.start.saturating_add(self.len)) % BUFLEN;
-        let available_len = BUFLEN.saturating_sub(self.len);
-        let first_len = (BUFLEN.saturating_sub(write_start)).min(available_len);
+        let write_start = (self.start.saturating_add(self.len)) % self.buf.len();
+        let available_len = self.buf.len().saturating_sub(self.len);
+        let first_len = (self.buf.len().saturating_sub(write_start)).min(available_len);
         let second_len = available_len.saturating_sub(first_len);
 
         let (second, first) = self.buf.split_at_mut(write_start);
@@ -144,6 +202,7 @@ impl ReadBuf {
         timeout: Duration,
     ) -> Result<Message<'_>> {
         loop {
+            self.prepare_frame()?;
             let err = {
                 // A workaround for borrow-checker not understanding early returns.
                 //
@@ -170,27 +229,24 @@ impl ReadBuf {
             };
 
             match err {
-                MessageDeserializeError::NotEnoughData(mut need_additional_bytes, ..) => {
-                    while need_additional_bytes > 0 {
-                        if self.is_full() {
-                            return Err(Error::ReadBufFull {
-                                #[allow(clippy::cast_possible_truncation)]
-                                need_additional_bytes: need_additional_bytes as u16,
-                            });
-                        }
-                        let size = with_timeout(
-                            "reading",
-                            timeout,
-                            conn.read_vectored(&mut self.unfilled_ioslices())
-                                .map_err(Error::Write),
-                        )
-                        .await?;
-                        if size == 0 {
-                            return Err(Error::PeerDisconnected);
-                        }
-                        self.len += size;
-                        need_additional_bytes = need_additional_bytes.saturating_sub(size)
+                MessageDeserializeError::NotEnoughData(need_additional_bytes, ..) => {
+                    if self.is_full() {
+                        return Err(Error::ReadBufFull {
+                            need_additional_bytes,
+                        });
                     }
+                    let size = with_timeout(
+                        "reading",
+                        timeout,
+                        conn.read_vectored(&mut self.unfilled_ioslices())
+                            .map_err(Error::Read),
+                    )
+                    .await?;
+                    if size == 0 {
+                        return Err(Error::PeerDisconnected);
+                    }
+                    self.len += size;
+                    // Revalidate after every read, including fragmented headers.
                 }
                 MessageDeserializeError::NeedContiguous => {
                     self.make_contiguous()?;
@@ -221,6 +277,97 @@ mod tests {
     };
 
     use super::{BUFLEN, ReadBuf};
+
+    #[tokio::test]
+    async fn fragmented_large_frame_and_following_control_survive_ring_wrap() {
+        use crate::vectored_traits::AsyncReadVectoredIntoCompat;
+        struct BytesOneAtATime(std::vec::IntoIter<u8>);
+        impl AsyncRead for BytesOneAtATime {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                out: &mut tokio::io::ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                if out.remaining() > 0 {
+                    if let Some(byte) = self.0.next() {
+                        out.put_slice(&[byte]);
+                    }
+                }
+                Poll::Ready(Ok(()))
+            }
+        }
+        let size = 32769usize;
+        let mut source = ((size + 1) as u32).to_be_bytes().to_vec();
+        source.push(5);
+        source.extend(vec![0x55; size]);
+        source.extend([0, 0, 0, 1, 1]);
+        let mut source: BoxAsyncReadVectored =
+            Box::new(BytesOneAtATime(source.into_iter()).into_vectored_compat());
+        let mut rb = ReadBuf::new();
+        rb.start = BUFLEN - 2;
+        rb.set_bitfield_bytes(Some(size)).unwrap();
+        match rb
+            .read_message(&mut source, Duration::from_secs(1))
+            .await
+            .unwrap()
+        {
+            Message::Bitfield(bytes) => assert_eq!(bytes.as_ref(), vec![0x55; size]),
+            _ => panic!("expected bitfield"),
+        }
+        assert!(matches!(
+            rb.read_message(&mut source, Duration::from_secs(1))
+                .await
+                .unwrap(),
+            Message::Unchoke
+        ));
+        for id in [0u8, 4, 5, 7, 20, 255] {
+            let bytes = [u32::MAX.to_be_bytes().as_slice(), &[id]].concat();
+            let mut source: BoxAsyncReadVectored =
+                Box::new(BytesOneAtATime(bytes.into_iter()).into_vectored_compat());
+            let mut rb = ReadBuf::new();
+            let error = rb
+                .read_message(&mut source, Duration::from_secs(1))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("exceeds limit"), "{error}");
+            assert_eq!(rb.buf.len(), BUFLEN);
+        }
+    }
+
+    #[test]
+    fn frame_limits_precede_allocation_and_growth_preserves_wrapped_data() {
+        for size in [16495, 16500, 32763, 32768, 32769, super::MAX_BITFIELD_BYTES] {
+            let mut rb = ReadBuf::new();
+            rb.set_bitfield_bytes(Some(size)).unwrap();
+            rb.start = BUFLEN - 2;
+            let header = [&((size + 1) as u32).to_be_bytes()[..], &[5]].concat();
+            for (i, byte) in header.iter().enumerate() {
+                rb.buf[(rb.start + i) % BUFLEN] = *byte;
+            }
+            rb.len = 5;
+            rb.prepare_frame().unwrap();
+            assert_eq!(rb.buf.len(), BUFLEN.max(size + 5));
+            let (a, b) = rb.as_slice_ranges();
+            assert_eq!([&rb.buf[a], &rb.buf[b]].concat(), header);
+        }
+        for id in [0u8, 4, 5, 6, 7, 8, 20, 255] {
+            let mut rb = ReadBuf::new();
+            rb.buf[..4].copy_from_slice(&u32::MAX.to_be_bytes());
+            rb.buf[4] = id;
+            rb.len = 5;
+            assert!(rb.prepare_frame().is_err());
+            assert_eq!(rb.buf.len(), BUFLEN, "untrusted size must not allocate");
+        }
+        let mut rb = ReadBuf::new();
+        rb.set_bitfield_bytes(Some(4)).unwrap();
+        rb.buf[..5].copy_from_slice(&[0, 0, 0, 6, 5]);
+        rb.len = 5;
+        assert!(rb.prepare_frame().is_err());
+        assert!(
+            rb.set_bitfield_bytes(Some(super::MAX_BITFIELD_BYTES + 1))
+                .is_err()
+        );
+    }
 
     #[test]
     fn test_ringbuf_ranges() {
