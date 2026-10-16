@@ -389,10 +389,9 @@ impl ManagedTorrent {
                 }
                 ManagedTorrentState::Initializing(init) => {
                     let init = init.clone();
-                    init.clear_pause_request();
-                    if !init.try_start_check() {
+                    let Some(check_guard) = init.start_check(peer_rx) else {
                         return Ok(());
-                    }
+                    };
 
                     let t = t.clone();
                     let span = t.shared().span.clone();
@@ -405,15 +404,23 @@ impl ManagedTorrent {
                         token.clone(),
                         async move {
                             let _task = task;
+                            let check_guard = check_guard;
                             let concurrent_init_semaphore =
                                 session.concurrent_initialize_semaphore.clone();
-                            let _permit = concurrent_init_semaphore
-                                .acquire()
-                                .await
-                                .context("bug: concurrent init semaphore was closed")?;
+                            let _permit = tokio::select! {
+                                biased;
+                                _ = check_guard.cancel.cancelled() => return Ok(()),
+                                permit = concurrent_init_semaphore.acquire() =>
+                                    permit.context("bug: concurrent init semaphore was closed")?,
+                            };
 
-                            let check_result = init.check().await;
-                            init.finish_check();
+                            // Dropping this future cannot detach blocking disk work:
+                            // the spawner executes it synchronously via block_in_place.
+                            let check_result = tokio::select! {
+                                biased;
+                                _ = check_guard.cancel.cancelled() => return Ok(()),
+                                result = init.check() => result,
+                            };
 
                             match check_result {
                                 Ok(paused) => {
@@ -430,7 +437,8 @@ impl ManagedTorrent {
                                     t.state_change_notify.notify_waiters();
                                     let stay_paused =
                                         g.paused || t.shared.deleting.load(Ordering::Acquire);
-                                    _start(&t, peer_rx, stay_paused, session, Some(g), token)
+                                    let peers = init.take_peers();
+                                    _start(&t, peers, stay_paused, session, Some(g), token)
                                 }
                                 Err(err) => {
                                     if init.is_pause_requested() {
