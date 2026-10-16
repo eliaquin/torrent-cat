@@ -185,6 +185,19 @@ pub enum AddIncomingPeerResult {
     ConcurrencyLimitReached,
 }
 
+struct PeerEpoch {
+    cancel: CancellationToken,
+    tasks: tokio_util::task::TaskTracker,
+}
+impl PeerEpoch {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            cancel: CancellationToken::new(),
+            tasks: tokio_util::task::TaskTracker::new(),
+        })
+    }
+}
+
 pub struct TorrentStateLive {
     peers: PeerStates,
     pub(crate) shared: Arc<ManagedTorrentShared>,
@@ -202,7 +215,8 @@ pub struct TorrentStateLive {
     peer_semaphore: Arc<Semaphore>,
 
     // The queue for peer manager to connect to them.
-    peer_queue_tx: UnboundedSender<SocketAddr>,
+    peer_queue_tx: UnboundedSender<(SocketAddr, Arc<PeerEpoch>)>,
+    peer_epoch: Mutex<Option<Arc<PeerEpoch>>>,
 
     finished_notify: Notify,
     new_pieces_notify: Notify,
@@ -288,6 +302,7 @@ impl TorrentStateLive {
             )),
             new_pieces_notify: Notify::new(),
             peer_queue_tx,
+            peer_epoch: Mutex::new(Some(PeerEpoch::new())),
             finished_notify: Notify::new(),
             down_speed_estimator,
             up_speed_estimator,
@@ -375,6 +390,11 @@ impl TorrentStateLive {
         checked_peer: CheckedIncomingConnection,
     ) -> anyhow::Result<AddIncomingPeerResult> {
         use dashmap::mapref::entry::Entry;
+        let epoch_guard = self.peer_epoch.lock();
+        let epoch = epoch_guard
+            .as_ref()
+            .context("tracker switch in progress")?
+            .clone();
         let (tx, rx) = crate::peer_connection::writer_channel();
         let permit = match self.peer_semaphore.clone().try_acquire_owned() {
             Ok(permit) => permit,
@@ -435,10 +455,16 @@ impl TorrentStateLive {
                 "[{}][addr={}]manage_incoming_peer",
                 self.shared.id, checked_peer.addr
             ),
-            aframe!(
-                self.clone()
-                    .task_manage_incoming_peer(checked_peer, counters, tx, rx, permit)
-            ),
+            epoch
+                .tasks
+                .track_future(self.clone().task_manage_incoming_peer(
+                    checked_peer,
+                    counters,
+                    tx,
+                    rx,
+                    permit,
+                    epoch.clone(),
+                )),
         );
         Ok(AddIncomingPeerResult::Added)
     }
@@ -493,8 +519,10 @@ impl TorrentStateLive {
         tx: PeerTx,
         rx: PeerRx,
         permit: OwnedSemaphorePermit,
+        epoch: Arc<PeerEpoch>,
     ) -> crate::Result<()> {
         let handler = PeerHandler {
+            epoch: epoch.clone(),
             uploads: crate::upload_queue::PeerUploads::new(self.upload_slots.clone()),
             addr: checked_peer.addr,
             incoming: true,
@@ -525,6 +553,8 @@ impl TorrentStateLive {
         let requester = handler.task_peer_chunk_requester();
 
         let res = tokio::select! {
+            biased;
+            _ = epoch.cancel.cancelled() => Ok(()),
             r = requester => {r}
             r = peer_connection.manage_peer_incoming(
                 rx,
@@ -551,6 +581,7 @@ impl TorrentStateLive {
         self: Arc<Self>,
         addr: SocketAddr,
         permit: OwnedSemaphorePermit,
+        epoch: Arc<PeerEpoch>,
     ) -> crate::Result<()> {
         let state = self;
         let (rx, tx) = state.peers.mark_peer_connecting(addr)?;
@@ -560,6 +591,7 @@ impl TorrentStateLive {
             .ok_or(Error::BugPeerNotFound)?;
 
         let handler = PeerHandler {
+            epoch: epoch.clone(),
             uploads: crate::upload_queue::PeerUploads::new(state.upload_slots.clone()),
             addr,
             incoming: false,
@@ -604,6 +636,8 @@ impl TorrentStateLive {
             .outgoing_connection_attempts
             .fetch_add(1, Ordering::Relaxed);
         let res = tokio::select! {
+            biased;
+            _ = epoch.cancel.cancelled() => Ok(()),
             r = requester => {r}
             r = conn_manager => {r}
         };
@@ -624,11 +658,14 @@ impl TorrentStateLive {
 
     async fn task_peer_adder(
         self: Arc<Self>,
-        mut peer_queue_rx: UnboundedReceiver<SocketAddr>,
+        mut peer_queue_rx: UnboundedReceiver<(SocketAddr, Arc<PeerEpoch>)>,
     ) -> crate::Result<()> {
         let state = self;
         loop {
-            let addr = peer_queue_rx.recv().await.ok_or(Error::TorrentIsNotLive)?;
+            let (addr, epoch) = peer_queue_rx.recv().await.ok_or(Error::TorrentIsNotLive)?;
+            if epoch.cancel.is_cancelled() {
+                continue;
+            }
             if state.shared.options.disable_upload() && state.is_finished_and_no_active_streams() {
                 debug!(?addr, "ignoring peer as we are finished");
                 state.peers.mark_peer_not_needed(addr);
@@ -675,13 +712,52 @@ impl TorrentStateLive {
                 continue;
             }
 
-            let permit = state.peer_semaphore.clone().acquire_owned().await?;
+            let permit = tokio::select! {
+                _ = epoch.cancel.cancelled() => continue,
+                permit = state.peer_semaphore.clone().acquire_owned() => permit?,
+            };
+            let guard = state.peer_epoch.lock();
+            if guard
+                .as_ref()
+                .is_none_or(|current| !Arc::ptr_eq(current, &epoch))
+            {
+                continue;
+            }
             state.spawn(
                 debug_span!(parent: state.shared.span.clone(), "manage_peer", peer = ?addr),
                 format!("[{}][addr={addr}]manage_peer", state.shared.id),
-                aframe!(state.clone().task_manage_outgoing_peer(addr, permit)),
+                epoch
+                    .tasks
+                    .track_future(state.clone().task_manage_outgoing_peer(
+                        addr,
+                        permit,
+                        epoch.clone(),
+                    )),
             );
         }
+    }
+
+    /// Called by the tracker stream after draining old peer addresses, before
+    /// announcing to another private tracker. No new peers can enter the old epoch.
+    pub(crate) async fn disconnect_for_tracker_switch(&self) -> anyhow::Result<()> {
+        let epoch = self
+            .peer_epoch
+            .lock()
+            .take()
+            .context("tracker switch already in progress")?;
+        epoch.cancel.cancel();
+        epoch.tasks.close();
+        // Failing closed leaves admission disabled if teardown cannot finish.
+        tokio::time::timeout(Duration::from_secs(5), epoch.tasks.wait())
+            .await
+            .context("private peer shutdown timed out")?;
+        let addresses: Vec<_> = self.peers.states.iter().map(|p| *p.key()).collect();
+        for address in addresses {
+            self.peers.drop_peer(address);
+        }
+        self.peers.live_outgoing_peers.write().clear();
+        *self.peer_epoch.lock() = Some(PeerEpoch::new());
+        Ok(())
     }
 
     pub fn torrent(&self) -> &ManagedTorrentShared {
@@ -745,13 +821,17 @@ impl TorrentStateLive {
     }
 
     pub(crate) fn add_peer_if_not_seen(&self, addr: SocketAddr) -> crate::Result<bool> {
+        let guard = self.peer_epoch.lock();
+        let Some(epoch) = guard.as_ref() else {
+            return Ok(false);
+        };
         match self.peers.add_if_not_seen(addr) {
             Some(handle) => handle,
             None => return Ok(false),
         };
 
         self.peer_queue_tx
-            .send(addr)
+            .send((addr, epoch.clone()))
             .ok()
             .ok_or(Error::TorrentIsNotLive)?;
         Ok(true)
@@ -923,11 +1003,15 @@ impl TorrentStateLive {
     }
 
     pub(crate) fn reconnect_all_not_needed_peers(&self) {
+        let guard = self.peer_epoch.lock();
+        let Some(epoch) = guard.as_ref() else {
+            return;
+        };
         self.peers
             .states
             .iter_mut()
             .filter_map(|mut p| p.value_mut().reconnect_not_needed_peer(&self.peers))
-            .map(|socket_addr| self.peer_queue_tx.send(socket_addr))
+            .map(|socket_addr| self.peer_queue_tx.send((socket_addr, epoch.clone())))
             .take_while(|r| r.is_ok())
             .last();
     }
@@ -1036,6 +1120,7 @@ impl Default for PeerFlowControl {
 // All peer state that would never be used by other actors should pe put here.
 // This state tracks a live peer.
 struct PeerHandler {
+    epoch: Arc<PeerEpoch>,
     uploads: Arc<crate::upload_queue::PeerUploads>,
     state: Arc<TorrentStateLive>,
     counters: Arc<AtomicPeerCounters>,
@@ -1413,7 +1498,17 @@ impl PeerHandler {
                 format!("[{}][addr={}]wait_for_peer", self.state.shared.id, handle),
                 async move {
                     trace!("waiting to reconnect again");
-                    tokio::time::sleep(dur).await;
+                    tokio::select! {
+                        _ = self.epoch.cancel.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep(dur) => {},
+                    }
+                    let epoch_guard = self.state.peer_epoch.lock();
+                    if epoch_guard
+                        .as_ref()
+                        .is_none_or(|current| !Arc::ptr_eq(current, &self.epoch))
+                    {
+                        return Ok(());
+                    }
                     trace!("finished waiting");
                     let should_requeue = self
                         .state
@@ -1443,7 +1538,7 @@ impl PeerHandler {
                     if should_requeue {
                         self.state
                             .peer_queue_tx
-                            .send(handle)
+                            .send((handle, self.epoch.clone()))
                             .ok()
                             .ok_or(Error::TorrentIsNotLive)?;
                     }

@@ -1,11 +1,7 @@
 // Modified for TorrentCat: transfer accounting, lifecycle announces and private isolation.
 use crate::{UdpTrackerClient, tracker_comms_http as http, tracker_comms_udp as udp};
 use anyhow::{Context, bail};
-use futures::{
-    StreamExt,
-    future::BoxFuture,
-    stream::{BoxStream, FuturesUnordered},
-};
+use futures::{future::BoxFuture, stream::BoxStream};
 use librqbit_core::hash_id::Id20;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::time::{Instant, timeout};
@@ -42,6 +38,9 @@ pub trait TorrentStatsProvider: Send + Sync {
     fn is_private(&self) -> bool {
         false
     }
+    fn disconnect_for_tracker_switch(&self) -> BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async { anyhow::bail!("private tracker switching requires peer isolation") })
+    }
     fn wait_for_transfers(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {})
     }
@@ -64,24 +63,36 @@ struct Reply {
     peers: Vec<SocketAddr>,
     tracker_id: Option<Vec<u8>>,
 }
+enum PeerEvent {
+    Peer(SocketAddr),
+    Switch(tokio::sync::oneshot::Sender<anyhow::Result<()>>),
+}
+#[derive(Default)]
+struct AnnounceState {
+    tracker_id: Option<Vec<u8>>,
+    started: bool,
+    attempted: bool,
+    completed: bool,
+}
+
 pub struct TrackerComms {
     info_hash: Id20,
     peer_id: Id20,
-    stats: Box<dyn TorrentStatsProvider>,
+    stats: Arc<dyn TorrentStatsProvider>,
     force_tracker_interval: Option<Duration>,
     announce_port: u16,
     reqwest_client: reqwest::Client,
     udp_client: UdpTrackerClient,
     key: u32,
     cancel: CancellationToken,
-    tx: tokio::sync::mpsc::Sender<SocketAddr>,
+    tx: tokio::sync::mpsc::Sender<PeerEvent>,
 }
 impl TrackerComms {
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         info_hash: Id20,
         peer_id: Id20,
-        trackers: Vec<Url>,
+        trackers: Vec<Vec<Url>>,
         stats: Box<dyn TorrentStatsProvider>,
         force_interval: Option<Duration>,
         announce_port: u16,
@@ -89,13 +100,21 @@ impl TrackerComms {
         udp_client: UdpTrackerClient,
         tasks: TaskTracker,
     ) -> Option<BoxStream<'static, SocketAddr>> {
-        let mut trackers: Vec<_> = trackers
+        use rand::seq::SliceRandom;
+        let mut seen = std::collections::HashSet::new();
+        let mut trackers: Vec<Vec<Url>> = trackers
             .into_iter()
-            .filter(|u| matches!(u.scheme(), "http" | "https" | "udp"))
+            .map(|tier| {
+                tier.into_iter()
+                    .filter(|u| {
+                        matches!(u.scheme(), "http" | "https" | "udp") && seen.insert(u.clone())
+                    })
+                    .collect()
+            })
+            .filter(|tier: &Vec<_>| !tier.is_empty())
             .collect();
-        // Fail closed: no private failover until peer isolation is implemented.
-        if stats.is_private() {
-            trackers.truncate(1);
+        for tier in &mut trackers {
+            tier.shuffle(&mut rand::rng());
         }
         if trackers.is_empty() {
             return None;
@@ -106,7 +125,7 @@ impl TrackerComms {
         let comms = Arc::new(Self {
             info_hash,
             peer_id,
-            stats,
+            stats: stats.into(),
             force_tracker_interval: force_interval,
             announce_port,
             reqwest_client,
@@ -117,100 +136,162 @@ impl TrackerComms {
             tx,
         });
         // Register before polling the stream, so shutdown cannot miss a queued worker.
+        let consumer = comms.stats.clone();
         let worker = tasks.track_future(async move {
-            let mut monitors = FuturesUnordered::new();
-            for url in trackers {
-                monitors.push(comms.monitor(url));
-            }
-            while monitors.next().await.is_some() {}
+            comms.monitor(trackers).await;
         });
         Some(Box::pin(async_stream::stream! {
             let _guard = guard;
             tokio::spawn(worker);
-            while let Some(peer) = rx.recv().await { yield peer; }
+            while let Some(event) = rx.recv().await {
+                match event {
+                    PeerEvent::Peer(peer) => yield peer,
+                    PeerEvent::Switch(reply) => {
+                        let result = consumer.disconnect_for_tracker_switch().await;
+                        let _ = reply.send(result);
+                    }
+                }
+            }
         }))
     }
-    async fn monitor(&self, url: Url) {
-        let mut tracker_id: Option<Vec<u8>> = None;
-        let mut started = false;
-        let mut attempted = false;
-        let mut retrying = false;
+    async fn switch_private_peers(&self) -> anyhow::Result<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(PeerEvent::Switch(tx))
+            .await
+            .context("peer stream closed")?;
+        rx.await.context("peer reset canceled")?
+    }
+    async fn finish_tracker(&self, url: &Url, state: &mut AnnounceState) {
+        if state.started && !state.completed && self.stats.get().is_completed() {
+            let _ = timeout(
+                Duration::from_secs(3),
+                self.request(url, Event::Completed, state.tracker_id.as_deref()),
+            )
+            .await;
+        }
+        if state.attempted {
+            let _ = timeout(
+                Duration::from_secs(3),
+                self.request(url, Event::Stopped, state.tracker_id.as_deref()),
+            )
+            .await;
+        }
+        state.started = false;
+        state.attempted = false;
+    }
+    async fn monitor(&self, mut tiers: Vec<Vec<Url>>) {
+        let mut states = std::collections::HashMap::<Url, AnnounceState>::new();
+        let mut active: Option<Url> = None;
         let initially_complete = self.stats.get().is_completed();
-        let mut completed = initially_complete;
         let mut next = Instant::now();
         let mut retry = Duration::from_secs(10);
-        loop {
+        let mut retrying = false;
+        'monitor: loop {
             if self.cancel.is_cancelled() {
                 break;
             }
-            let event = if !started {
-                Event::Started
-            } else if !completed && self.stats.get().is_completed() {
-                Event::Completed
-            } else {
-                Event::Update
-            };
-            if Instant::now() < next && (event != Event::Completed || retrying) {
+            let completion_due = active
+                .as_ref()
+                .and_then(|u| states.get(u))
+                .is_some_and(|s| s.started && !s.completed && self.stats.get().is_completed());
+            if Instant::now() < next && (!completion_due || retrying) {
                 tokio::select! {
                     _ = self.cancel.cancelled() => break,
                     _ = tokio::time::sleep(Duration::from_millis(200).min(next.saturating_duration_since(Instant::now()))) => continue,
                 }
             }
-            attempted = true;
-            let result = tokio::select! {
-                _ = self.cancel.cancelled() => break,
-                result = timeout(Duration::from_secs(10), self.request(&url, event, tracker_id.as_deref())) => result.unwrap_or_else(|_| Err(anyhow::anyhow!("tracker request timed out"))),
-            };
-            // Reject unrepresentable deadlines before changing announce state.
-            let result = result.and_then(|reply| {
-                let deadline = checked_deadline(reply.interval, self.force_tracker_interval)?;
-                Ok((reply, deadline))
-            });
-            match result {
-                Ok((reply, deadline)) => {
-                    if reply.tracker_id.is_some() {
-                        tracker_id = reply.tracker_id;
-                    }
-                    started = true;
-                    retrying = false;
-                    if event == Event::Completed {
-                        completed = true;
-                    }
-                    retry = Duration::from_secs(10);
-                    next = deadline;
-                    for peer in reply.peers {
-                        tokio::select! {
-                            _ = self.cancel.cancelled() => break,
-                            result = self.tx.send(peer) => if result.is_err() { break; },
-                        }
+            // Public: start at the first tier on every announce. Private: remain
+            // with the current tracker until it fails, then try alternatives.
+            let mut candidates: Vec<Url> = tiers.iter().flatten().cloned().collect();
+            if self.stats.is_private()
+                && let Some(url) = active.as_ref()
+            {
+                candidates.retain(|u| u != url);
+                candidates.insert(0, url.clone());
+            }
+            let mut success = false;
+            for url in candidates {
+                if self.cancel.is_cancelled() {
+                    break 'monitor;
+                }
+                if self.stats.is_private() && active.as_ref().is_some_and(|old| old != &url) {
+                    let result = tokio::select! {
+                        _ = self.cancel.cancelled() => break 'monitor,
+                        r = self.switch_private_peers() => r,
+                    };
+                    if result.is_err() {
+                        break 'monitor;
+                    } // fail closed
+                    if let Some(old) = active.as_ref()
+                        && let Some(state) = states.get_mut(old)
+                    {
+                        self.finish_tracker(old, state).await;
                     }
                 }
-                Err(error) => {
-                    // Do not log URLs/passkeys. Rejection is not an invitation to spoof identity.
-                    tracing::debug!(%error, "tracker announce failed");
-                    retrying = true;
-                    next = Instant::now() + retry;
-                    retry = (retry * 2).min(Duration::from_secs(600));
+                active = Some(url.clone());
+                let state = states.entry(url.clone()).or_insert_with(|| AnnounceState {
+                    completed: initially_complete,
+                    ..Default::default()
+                });
+                let event = if !state.started {
+                    Event::Started
+                } else if !state.completed && self.stats.get().is_completed() {
+                    Event::Completed
+                } else {
+                    Event::Update
+                };
+                state.attempted = true;
+                let result = tokio::select! {
+                    _ = self.cancel.cancelled() => break 'monitor,
+                    r = timeout(Duration::from_secs(10), self.request(&url, event, state.tracker_id.as_deref())) => r.unwrap_or_else(|_| Err(anyhow::anyhow!("tracker request timed out"))),
+                }.and_then(|reply| {
+                    let deadline = checked_deadline(reply.interval, self.force_tracker_interval)?;
+                    Ok((reply, deadline))
+                });
+                match result {
+                    Ok((reply, deadline)) => {
+                        if reply.tracker_id.is_some() {
+                            state.tracker_id = reply.tracker_id;
+                        }
+                        state.started = true;
+                        if event == Event::Completed {
+                            state.completed = true;
+                        }
+                        for tier in &mut tiers {
+                            if let Some(index) = tier.iter().position(|u| u == &url) {
+                                let preferred = tier.remove(index);
+                                tier.insert(0, preferred);
+                                break;
+                            }
+                        }
+                        retrying = false;
+                        retry = Duration::from_secs(10);
+                        next = deadline;
+                        for peer in reply.peers {
+                            tokio::select! {
+                                _ = self.cancel.cancelled() => break 'monitor,
+                                r = self.tx.send(PeerEvent::Peer(peer)) => if r.is_err() { break 'monitor; },
+                            }
+                        }
+                        success = true;
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "tracker announce failed");
+                    }
                 }
             }
+            if !success {
+                retrying = true;
+                next = Instant::now() + retry;
+                retry = (retry * 2).min(Duration::from_secs(600));
+            }
         }
-        // Finish canceled peer writers before taking the final accounting snapshot.
         let _ = timeout(Duration::from_secs(2), self.stats.wait_for_transfers()).await;
-        // A pause can race the final verified piece; do not lose its completion event.
-        if started && !completed && self.stats.get().is_completed() {
-            let _ = timeout(
-                Duration::from_secs(3),
-                self.request(&url, Event::Completed, tracker_id.as_deref()),
-            )
-            .await;
-        }
-        // Best effort and bounded, but awaited by pause/remove/application shutdown.
-        if attempted {
-            let _ = timeout(
-                Duration::from_secs(3),
-                self.request(&url, Event::Stopped, tracker_id.as_deref()),
-            )
-            .await;
+        // Private previous trackers were already stopped before crossing the barrier.
+        for (url, mut state) in states {
+            self.finish_tracker(&url, &mut state).await;
         }
     }
     async fn request(
@@ -341,5 +422,202 @@ mod interval_tests {
                 >= before + Duration::from_secs(60)
         );
         assert!(checked_deadline(Duration::ZERO, None).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod failover_tests {
+    use super::*;
+    use futures::StreamExt;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        sync::Notify,
+    };
+
+    struct HttpTracker {
+        url: Url,
+        reject: Arc<AtomicBool>,
+        requests: Arc<AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
+    }
+    impl Drop for HttpTracker {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+    impl HttpTracker {
+        async fn new() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = Url::parse(&format!(
+                "http://{}/announce",
+                listener.local_addr().unwrap()
+            ))
+            .unwrap();
+            let reject = Arc::new(AtomicBool::new(false));
+            let requests = Arc::new(AtomicUsize::new(0));
+            let r = reject.clone();
+            let n = requests.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    let (mut peer, _) = listener.accept().await.unwrap();
+                    let mut buf = [0; 8192];
+                    let _ = peer.read(&mut buf).await;
+                    n.fetch_add(1, Ordering::SeqCst);
+                    let status = if r.load(Ordering::SeqCst) {
+                        "503 Unavailable"
+                    } else {
+                        "200 OK"
+                    };
+                    let body = "d8:intervali1e5:peers0:e";
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = peer.write_all(response.as_bytes()).await;
+                }
+            });
+            Self {
+                url,
+                reject,
+                requests,
+                task,
+            }
+        }
+    }
+    struct PrivateStats {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+        fail: bool,
+    }
+    impl TorrentStatsProvider for PrivateStats {
+        fn get(&self) -> TrackerCommsStats {
+            TrackerCommsStats {
+                total_bytes: 1,
+                left_bytes: 1,
+                ..Default::default()
+            }
+        }
+        fn is_private(&self) -> bool {
+            true
+        }
+        fn disconnect_for_tracker_switch(&self) -> BoxFuture<'_, anyhow::Result<()>> {
+            Box::pin(async {
+                self.entered.notify_one();
+                self.release.notified().await;
+                anyhow::ensure!(!self.fail, "injected disconnect failure");
+                Ok(())
+            })
+        }
+    }
+    #[tokio::test]
+    async fn successful_tracker_is_promoted_within_its_tier() {
+        let bad = HttpTracker::new().await;
+        let good = HttpTracker::new().await;
+        bad.reject.store(true, Ordering::SeqCst);
+        let cancel = CancellationToken::new();
+        let tasks = TaskTracker::new();
+        let udp = UdpTrackerClient::new(cancel.clone(), None).await.unwrap();
+        let mut stream = TrackerComms::start(
+            Id20::default(),
+            Id20::default(),
+            vec![vec![bad.url.clone(), good.url.clone()]],
+            Box::new(()),
+            None,
+            1234,
+            reqwest::Client::new(),
+            udp,
+            tasks.clone(),
+        )
+        .unwrap();
+        let consumer = tokio::spawn(async move { while stream.next().await.is_some() {} });
+        timeout(Duration::from_secs(3), async {
+            while good.requests.load(Ordering::SeqCst) < 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let initial_bad = bad.requests.load(Ordering::SeqCst);
+        assert!(initial_bad <= 1);
+        bad.reject.store(false, Ordering::SeqCst);
+        timeout(Duration::from_secs(3), async {
+            while good.requests.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            bad.requests.load(Ordering::SeqCst),
+            initial_bad,
+            "successful tracker should stay first within tier"
+        );
+        consumer.abort();
+        let _ = consumer.await;
+        tasks.close();
+        timeout(Duration::from_secs(4), tasks.wait()).await.unwrap();
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn backup_waits_for_disconnect_and_disconnect_failure_is_closed() {
+        for fail in [false, true] {
+            let a = HttpTracker::new().await;
+            let b = HttpTracker::new().await;
+            a.reject.store(true, Ordering::SeqCst);
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let cancel = CancellationToken::new();
+            let tasks = TaskTracker::new();
+            let udp = UdpTrackerClient::new(cancel.clone(), None).await.unwrap();
+            let mut stream = TrackerComms::start(
+                Id20::default(),
+                Id20::default(),
+                vec![vec![a.url.clone()], vec![b.url.clone()]],
+                Box::new(PrivateStats {
+                    entered: entered.clone(),
+                    release: release.clone(),
+                    fail,
+                }),
+                None,
+                1234,
+                reqwest::Client::new(),
+                udp,
+                tasks.clone(),
+            )
+            .unwrap();
+            let consumer = tokio::spawn(async move { while stream.next().await.is_some() {} });
+            timeout(Duration::from_secs(3), entered.notified())
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(
+                b.requests.load(Ordering::SeqCst),
+                0,
+                "announce crossed an unfinished disconnect barrier"
+            );
+            release.notify_one();
+            if fail {
+                timeout(Duration::from_secs(3), consumer)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(b.requests.load(Ordering::SeqCst), 0);
+            } else {
+                timeout(Duration::from_secs(3), async {
+                    while b.requests.load(Ordering::SeqCst) == 0 {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                consumer.abort();
+                let _ = consumer.await;
+            }
+            tasks.close();
+            timeout(Duration::from_secs(4), tasks.wait()).await.unwrap();
+            cancel.cancel();
+        }
     }
 }

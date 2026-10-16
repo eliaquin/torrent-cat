@@ -100,3 +100,7 @@ default-features = false
 
 [dependencies.urlencoding]
 version = "2"
+
+[dev-dependencies.tokio]
+version = "1"
+features = ["io-util", "macros", "rt-multi-thread", "test-util"]

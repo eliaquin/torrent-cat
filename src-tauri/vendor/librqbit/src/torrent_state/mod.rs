@@ -184,6 +184,7 @@ pub struct ManagedTorrentShared {
     pub info_hash: Id20,
     pub(crate) spawner: BlockingSpawner,
     pub trackers: Vec<url::Url>,
+    pub(crate) tracker_tiers: Vec<Vec<url::Url>>,
     pub(crate) tracker_downloaded: AtomicU64,
     pub(crate) tracker_uploaded: AtomicU64,
     pub(crate) tracker_have: AtomicU64,

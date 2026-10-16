@@ -214,7 +214,7 @@ fn fixture(path: &Path, trackers: Vec<String>) -> Vec<u8> {
     std::fs::write(path.join("b.bin"), vec![99; 16_384]).unwrap();
     let torrent = lava_torrent::torrent::v1::TorrentBuilder::new(path, 16_384)
         .set_privacy(true)
-        .set_announce_list(vec![trackers])
+        .set_announce_list(trackers.into_iter().map(|u| vec![u]).collect())
         .set_num_threads(2)
         .build()
         .unwrap();
@@ -487,33 +487,133 @@ async fn http_respects_interval_and_minimum_without_repeated_started() {
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn private_tracker_failure_does_not_fall_back_to_other_trackers() {
+async fn private_failover_disconnects_old_peers_before_announcing_and_does_not_fail_back() {
     let primary = Tracker::http(1, 1).await;
-    primary.state.lock().unwrap().reject = true;
     let secondary = Tracker::http(1, 1).await;
+    let forbidden = Tracker::http(1, 1).await;
+    let old_peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stale_peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fresh_peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    primary.state.lock().unwrap().peers = vec![
+        old_peer.local_addr().unwrap(),
+        stale_peer.local_addr().unwrap(),
+    ];
+    secondary.state.lock().unwrap().peers = vec![fresh_peer.local_addr().unwrap()];
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
     let bytes = fixture(&source, vec![primary.url.clone(), secondary.url.clone()]);
-    let client = session(&source, Some(&secondary.url)).await;
+    let client = Session::new_with_opts(
+        source.clone(),
+        SessionOptions {
+            dht: None,
+            disable_local_service_discovery: true,
+            peer_limit: Some(1),
+            trackers: HashSet::from([forbidden.url.parse().unwrap()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     let handle = add(
         &client,
         &bytes,
         &source,
         None,
         vec![],
-        vec![secondary.url.clone()],
+        vec![forbidden.url.clone()],
     )
     .await;
-    primary.wait(|r| r.len() >= 2).await;
-    assert!(
-        primary.records()[1]
-            .at
-            .duration_since(primary.records()[0].at)
-            >= Duration::from_secs(9)
+    let (mut peer, _) = timeout(Duration::from_secs(5), old_peer.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut h = [0; 68];
+    peer.read_exact(&mut h).await.unwrap();
+    h[48..].fill(77);
+    h[20..28].fill(0);
+    peer.write_all(&h).await.unwrap();
+    peer.write_all(&[0, 0, 0, 2, 5, 0, 0, 0, 0, 1, 2])
+        .await
+        .unwrap();
+    // Drain initial bitfield + unchoke so EOF establishes actual socket closure.
+    for _ in 0..2 {
+        let n = peer.read_u32().await.unwrap();
+        let mut body = vec![0; n as usize];
+        peer.read_exact(&mut body).await.unwrap();
+    }
+    primary.state.lock().unwrap().reject = true;
+    let mut byte = [0];
+    assert_eq!(
+        timeout(Duration::from_secs(8), peer.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
     );
+    let closed = Instant::now();
+    secondary
+        .wait(|r| r.iter().any(|r| r.event() == "started"))
+        .await;
+    // The tracker request may race observation of EOF, so the wire ordering is
+    // additionally checked by keeping the backup handler gated below in unit tests.
+    assert!(secondary.records()[0].at + Duration::from_millis(50) >= closed);
+    let (_fresh, _) = timeout(Duration::from_secs(3), fresh_peer.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        timeout(Duration::from_millis(200), stale_peer.accept())
+            .await
+            .is_err(),
+        "queued peer from old tracker must never connect"
+    );
+    primary.state.lock().unwrap().reject = false;
+    let primary_count = primary.records().len();
+    secondary.wait(|r| r.len() >= 2).await;
+    assert_eq!(
+        primary.records().len(),
+        primary_count,
+        "private tracker must not fail back while active tracker works"
+    );
+    assert!(
+        timeout(Duration::from_millis(1200), old_peer.accept())
+            .await
+            .is_err(),
+        "old peers must not reconnect"
+    );
+    assert!(forbidden.records().is_empty());
     client.pause(&handle).await.unwrap();
-    assert!(secondary.records().is_empty());
-    assert_eq!(primary.records().last().unwrap().event(), "stopped");
+    assert_eq!(secondary.records().last().unwrap().event(), "stopped");
+    client.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_tiers_retry_primary_before_backup_and_stop_at_success() {
+    let primary = Tracker::http(1, 1).await;
+    let secondary = Tracker::http(1, 1).await;
+    let third = Tracker::http(1, 1).await;
+    primary.state.lock().unwrap().reject = true;
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    fixture(&source, vec![primary.url.clone()]);
+    let torrent = lava_torrent::torrent::v1::TorrentBuilder::new(&source, 16384)
+        .set_announce_list(vec![
+            vec![primary.url.clone()],
+            vec![secondary.url.clone()],
+            vec![third.url.clone()],
+        ])
+        .set_num_threads(1)
+        .build()
+        .unwrap();
+    let mut bytes = Vec::new();
+    torrent.write_into(&mut bytes).unwrap();
+    let client = session(&source, None).await;
+    add(&client, &bytes, &source, None, vec![], vec![]).await;
+    secondary.wait(|r| r.len() >= 2).await;
+    assert!(primary.records().len() >= 2);
+    assert!(third.records().is_empty());
+    let p = primary.records();
+    let b = secondary.records();
+    assert!(p[0].at < b[0].at && p[1].at < b[1].at);
     client.stop().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
