@@ -151,6 +151,8 @@ impl JsonSessionPersistenceStore {
             only_files: torrent.only_files().clone(),
             is_paused: torrent.is_paused(),
             pending_delete: None,
+            name: torrent.name(),
+            metadata_error: None,
             output_folder: torrent.shared().options.output_folder.clone(),
         };
 
@@ -258,21 +260,33 @@ impl SessionPersistenceStore for JsonSessionPersistenceStore {
             .get(&id)
             .cloned()
             .context("no torrent found")?;
-        let mut buf = Vec::new();
-        let torrent_bytes_filename = self.torrent_bytes_filename(&st.info_hash);
-        let mut torrent_bytes_file = match tokio::fs::File::open(&torrent_bytes_filename).await {
-            Ok(f) => f,
-            Err(e) => {
-                warn!(error=?e, filename=?torrent_bytes_filename, "error opening torrent bytes file");
-                return Ok(st);
-            }
-        };
-        if let Err(e) = torrent_bytes_file.read_to_end(&mut buf).await {
-            warn!(error=?e, filename=?torrent_bytes_filename, "error reading torrent bytes file");
-        } else {
-            st.torrent_bytes = buf.into();
+        const MAX_METADATA: u64 = 32 * 1024 * 1024;
+        let filename = self.torrent_bytes_filename(&st.info_hash);
+        let bytes = async {
+            let mut options = tokio::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            options.custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW);
+            let file = options.open(&filename).await?;
+            let meta = file.metadata().await?;
+            anyhow::ensure!(
+                meta.is_file() && meta.len() <= MAX_METADATA,
+                "metadata file is not regular or is oversized"
+            );
+            let mut bytes = Vec::new();
+            file.take(MAX_METADATA + 1).read_to_end(&mut bytes).await?;
+            anyhow::ensure!(
+                bytes.len() as u64 <= MAX_METADATA,
+                "metadata file is oversized"
+            );
+            Ok::<_, anyhow::Error>(bytes)
         }
-        return Ok(st);
+        .await;
+        match bytes {
+            Ok(bytes) => st.torrent_bytes = bytes.into(),
+            Err(_) => st.metadata_error = Some("Saved torrent metadata cannot be read.".into()),
+        }
+        Ok(st)
     }
 
     async fn stream_all(
@@ -322,6 +336,8 @@ mod tests {
             only_files: None,
             is_paused: false,
             pending_delete: None,
+            name: None,
+            metadata_error: None,
         };
         store
             .mutate(|db| {

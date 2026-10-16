@@ -9,7 +9,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use librqbit_core::Id20;
-use librqbit_core::magnet::Magnet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
@@ -23,15 +22,19 @@ pub struct SerializedTorrent {
         serialize_with = "serialize_info_hash",
         deserialize_with = "deserialize_info_hash"
     )]
-    info_hash: Id20,
+    pub(crate) info_hash: Id20,
     #[serde(skip)]
     torrent_bytes: Bytes,
-    trackers: HashSet<String>,
-    output_folder: PathBuf,
-    only_files: Option<Vec<usize>>,
-    is_paused: bool,
+    pub(crate) trackers: HashSet<String>,
+    pub(crate) output_folder: PathBuf,
+    pub(crate) only_files: Option<Vec<usize>>,
+    pub(crate) is_paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pending_delete: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) name: Option<String>,
+    #[serde(skip)]
+    pub(crate) metadata_error: Option<String>,
 }
 
 impl SerializedTorrent {
@@ -39,22 +42,20 @@ impl SerializedTorrent {
         &self.info_hash
     }
     pub fn into_add_torrent(self) -> anyhow::Result<(AddTorrent<'static>, AddTorrentOptions)> {
-        if self.pending_delete.is_some() && self.torrent_bytes.is_empty() {
-            anyhow::bail!(
-                "pending removal requires saved torrent metadata; recovery entry retained"
-            );
+        if let Some(error) = self.metadata_error {
+            anyhow::bail!(error);
         }
-        let add_torrent = if !self.torrent_bytes.is_empty() {
-            AddTorrent::TorrentFileBytes(self.torrent_bytes)
-        } else {
-            let magnet = Magnet::from_id20(
-                self.info_hash,
-                self.trackers.into_iter().collect(),
-                self.only_files.clone(),
-            )
-            .to_string();
-            AddTorrent::from_url(magnet)
-        };
+        anyhow::ensure!(
+            !self.torrent_bytes.is_empty(),
+            "Saved torrent metadata is missing or empty."
+        );
+        let parsed = librqbit_core::torrent_metainfo::torrent_from_bytes(&self.torrent_bytes)
+            .map_err(|_| anyhow::anyhow!("Saved torrent metadata is invalid"))?;
+        anyhow::ensure!(
+            parsed.info_hash == self.info_hash,
+            "Saved torrent metadata belongs to a different torrent."
+        );
+        let add_torrent = AddTorrent::TorrentFileBytes(self.torrent_bytes);
 
         let opts = AddTorrentOptions {
             paused: self.is_paused,

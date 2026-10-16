@@ -26,7 +26,9 @@ use crate::{
     merge_streams::merge_streams,
     peer_connection::PeerConnectionOptions,
     read_buf::ReadBuf,
-    session_persistence::{SessionPersistenceStore, json::JsonSessionPersistenceStore},
+    session_persistence::{
+        SerializedTorrent, SessionPersistenceStore, json::JsonSessionPersistenceStore,
+    },
     session_stats::SessionStats,
     spawn_utils::BlockingSpawner,
     storage::{
@@ -905,17 +907,31 @@ impl Session {
                                 Some(st) => {
                                     let (id, st) = st?;
                                     let span = add_torrent_span(st.info_hash());
-                                    let pending_delete = st.pending_delete;
-                                    let (add_torrent, mut opts) = st.into_add_torrent()?;
-                                    opts.preferred_id = Some(id);
-                                    if pending_delete.is_some() { opts.paused = true; }
                                     let session = session.clone();
                                     let fut = async move {
-                                        let result = session.add_torrent(add_torrent, Some(opts)).await?;
-                                        if let Some(delete_files) = pending_delete {
-                                            session.delete(id.into(), delete_files).await?;
+                                        let restore = async {
+                                            if st.pending_delete == Some(false) {
+                                                session.persistence.as_ref().context("missing persistence")?.delete(id).await?;
+                                                return Ok::<_, anyhow::Error>(());
+                                            }
+                                            let (add_torrent, mut opts) = st.clone().into_add_torrent()?;
+                                            opts.preferred_id = Some(id);
+                                            if st.pending_delete.is_some() { opts.paused = true; }
+                                            session.add_torrent(add_torrent, Some(opts)).await?;
+                                            if let Some(delete_files) = st.pending_delete {
+                                                session.delete(id.into(), delete_files).await?;
+                                            }
+                                            Ok::<_, anyhow::Error>(())
+                                        }.await;
+                                        match restore {
+                                            Ok(()) => Ok::<_, anyhow::Error>(()),
+                                            Err(error) => {
+                                                if session.get(id.into()).is_none() {
+                                                    session.register_recovery(id, &st, error)?;
+                                                }
+                                                Ok(())
+                                            }
                                         }
-                                        Ok::<_, anyhow::Error>(result)
                                     }.instrument(span);
                                     futs.push(fut);
                                 },
@@ -1304,6 +1320,11 @@ impl Session {
         {
             let _operation = existing.shared.lifecycle.lock().await;
             if self.ensure_managed(&existing).is_ok() {
+                if existing.metadata.load().is_none() {
+                    bail!(
+                        "Saved metadata needs repair. Use Repair torrent with the original .torrent file."
+                    );
+                }
                 if existing.shared.deleting.load(Ordering::Acquire) {
                     bail!("torrent removal is pending");
                 }
@@ -1322,6 +1343,11 @@ impl Session {
                 .find(|t| t.info_hash() == info_hash)
                 .cloned();
             if let Some(existing) = existing {
+                if existing.metadata.load().is_none() {
+                    bail!(
+                        "Saved metadata needs repair. Use Repair torrent with the original .torrent file."
+                    );
+                }
                 if !opts.list_only {
                     return Ok(AddTorrentResponse::AlreadyManaged(existing.id(), existing));
                 }
@@ -1557,6 +1583,180 @@ impl Session {
         Ok(AddTorrentResponse::Added(id, managed_torrent))
     }
 
+    fn restored_shared(
+        self: &Arc<Self>,
+        id: TorrentId,
+        record: &SerializedTorrent,
+        metadata: Option<&TorrentMetadata>,
+    ) -> anyhow::Result<Arc<ManagedTorrentShared>> {
+        let tiers = metadata
+            .map(|m| tracker_tiers_from_bytes(&m.torrent_bytes, &[]))
+            .transpose()?
+            .unwrap_or_default();
+        let trackers = if metadata.is_some() {
+            tiers.iter().flatten().cloned().unique().collect()
+        } else {
+            record
+                .trackers
+                .iter()
+                .filter_map(|u| url::Url::parse(u).ok())
+                .collect()
+        };
+        Ok(Arc::new(ManagedTorrentShared {
+            id,
+            info_hash: record.info_hash,
+            spawner: self.spawner.clone(),
+            trackers,
+            tracker_tiers: tiers,
+            tracker_downloaded: AtomicU64::new(0),
+            tracker_uploaded: AtomicU64::new(0),
+            tracker_have: AtomicU64::new(0),
+            transfer_tasks: TaskTracker::new(),
+            lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+            deleting: std::sync::atomic::AtomicBool::new(record.pending_delete.is_some()),
+            delete_files: std::sync::atomic::AtomicBool::new(
+                record.pending_delete.unwrap_or(false),
+            ),
+            peer_id: self.peer_id,
+            span: debug_span!(parent:self.rs(), "torrent", id),
+            options: ManagedTorrentOptions {
+                output_folder: record.output_folder.clone(),
+                allow_overwrite: true,
+                peer_connect_timeout: self.peer_opts.connect_timeout,
+                peer_read_write_timeout: self.peer_opts.read_write_timeout,
+                peer_limit: self.peer_limit,
+                #[cfg(feature = "disable-upload")]
+                _disable_upload: self._disable_upload,
+                ..Default::default()
+            },
+            connector: self.connector.clone(),
+            storage_factory: self
+                .default_storage_factory
+                .as_ref()
+                .map(|factory| factory.clone_box())
+                .unwrap_or_else(|| FilesystemStorageFactory::default().boxed()),
+            session: Arc::downgrade(self),
+            magnet_name: record
+                .name
+                .clone()
+                .or_else(|| Some(record.info_hash.as_string())),
+            client_name_and_version: self.client_name_and_version.clone(),
+        }))
+    }
+
+    fn register_recovery(
+        self: &Arc<Self>,
+        id: TorrentId,
+        record: &SerializedTorrent,
+        error: anyhow::Error,
+    ) -> anyhow::Result<()> {
+        let shared = self.restored_shared(id, record, None)?;
+        let handle = Arc::new(ManagedTorrent {
+            shared,
+            metadata: ArcSwapOption::new(None),
+            state_change_notify: Notify::new(),
+            locked: RwLock::new(ManagedTorrentLocked {
+                paused: true,
+                only_files: record.only_files.clone(),
+                state: ManagedTorrentState::Error(anyhow::anyhow!(
+                    "{}. Choose Repair torrent with the original .torrent file.",
+                    error.to_string().trim_end_matches('.')
+                )),
+            }),
+        });
+        self.db.write().add_torrent(handle, id);
+        Ok(())
+    }
+
+    /// Restore a retained recovery entry using matching metainfo. Never discovers
+    /// metadata on the network or changes the saved output folder or selection.
+    pub async fn repair_metadata(
+        self: &Arc<Self>,
+        id: TorrentId,
+        bytes: Bytes,
+    ) -> anyhow::Result<()> {
+        let handle = self.get(id.into()).context("no such torrent")?;
+        let _operation = handle.shared.lifecycle.lock().await;
+        self.ensure_managed(&handle)?;
+        anyhow::ensure!(
+            handle.metadata.load().is_none(),
+            "Torrent metadata is already available"
+        );
+        anyhow::ensure!(
+            bytes.len() <= 32 * 1024 * 1024,
+            "Torrent metadata is too large"
+        );
+        let parsed = torrent_from_bytes(bytes).context("Invalid torrent metadata")?;
+        anyhow::ensure!(
+            parsed.meta.info_hash == handle.info_hash(),
+            "This .torrent file belongs to a different torrent"
+        );
+        let metadata = Arc::new(TorrentMetadata::new(
+            parsed.meta.info.data.validate()?,
+            parsed.torrent_bytes,
+            parsed.meta.info.raw_bytes.0,
+        )?);
+        let record = self
+            .persistence
+            .as_ref()
+            .context("Recovery entry has no persistence store")?
+            .get(id)
+            .await?;
+        if let Some(selected) = &record.only_files {
+            anyhow::ensure!(
+                selected.iter().all(|i| *i < metadata.file_infos.len()),
+                "Saved file selection is invalid"
+            );
+        }
+        let lifecycle = self.lifecycle.lock().await;
+        anyhow::ensure!(!self.closing.is_cancelled(), "session is stopping");
+        // Pin recovery paused before publishing usable metadata. If the later
+        // metadata/JSON commit fails, restart must not unexpectedly announce.
+        self.persistence
+            .as_ref()
+            .context("missing persistence")?
+            .update_metadata(id, &handle)
+            .await?;
+        let shared = self.restored_shared(id, &record, Some(&metadata))?;
+        let storage = self
+            .spawner
+            .block_in_place_with_semaphore(|| {
+                shared.storage_factory.create_and_init(&shared, &metadata)
+            })
+            .await?;
+        let init = Arc::new(TorrentStateInitializing::new(
+            shared.clone(),
+            metadata.clone(),
+            record.only_files.clone(),
+            storage,
+        ));
+        let repaired = Arc::new(ManagedTorrent {
+            shared,
+            metadata: ArcSwapOption::new(Some(metadata)),
+            state_change_notify: Notify::new(),
+            locked: RwLock::new(ManagedTorrentLocked {
+                paused: true,
+                only_files: record.only_files,
+                state: ManagedTorrentState::Initializing(init),
+            }),
+        });
+        let new_operation = repaired.shared.lifecycle.clone().lock_owned().await;
+        self.persistence
+            .as_ref()
+            .context("missing persistence")?
+            .store(id, &repaired)
+            .await?;
+        self.db.write().add_torrent(repaired.clone(), id);
+        repaired.start(None, true)?;
+        drop(lifecycle);
+        drop(new_operation);
+        drop(_operation);
+        if let Some(delete_files) = record.pending_delete {
+            self.delete(id.into(), delete_files).await?;
+        }
+        Ok(())
+    }
+
     pub fn get(&self, id: TorrentIdOrHash) -> Option<ManagedTorrentHandle> {
         match id {
             TorrentIdOrHash::Id(id) => self.db.read().torrents.get(&id).cloned(),
@@ -1773,6 +1973,9 @@ impl Session {
         if handle.shared.deleting.load(Ordering::Acquire) {
             bail!("torrent removal is pending");
         }
+        if handle.metadata.load().is_none() {
+            bail!("Saved metadata needs repair before resuming");
+        }
         if self.closing.is_cancelled() {
             bail!("session is stopping");
         }
@@ -1790,6 +1993,9 @@ impl Session {
         self.ensure_managed(handle)?;
         if handle.shared.deleting.load(Ordering::Acquire) {
             bail!("torrent removal is pending");
+        }
+        if handle.metadata.load().is_none() {
+            bail!("Saved metadata needs repair before resuming");
         }
         if self.closing.is_cancelled() {
             bail!("session is stopping");

@@ -74,6 +74,10 @@ async fn add_torrent(
         .map_err(err)
 }
 #[tauri::command]
+async fn repair_metadata(s: tauri::State<'_, AppState>, id: usize, path: PathBuf) -> Cmd<()> {
+    s.core.repair_metadata(id, path).await.map_err(err)
+}
+#[tauri::command]
 async fn torrent_action(s: tauri::State<'_, AppState>, id: usize, action: String) -> Cmd<()> {
     s.core.action(id, &action).await.map_err(err)
 }
@@ -465,6 +469,7 @@ fn main() {
             snapshot,
             file_pieces,
             add_torrent,
+            repair_metadata,
             torrent_action,
             select_files,
             preferences,

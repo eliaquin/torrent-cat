@@ -15,8 +15,8 @@ Las referencias de líneas de la auditoría describen el commit base, no el cód
 | F7 — recuperación y URLData UDP | Integrado en `edfed59` y publicado | Reloj simulado, UDP IPv4/IPv6 y ruta/query |
 | F8 — extensiones y PEX | Integrado en `4515126` y publicado | Negociación por TCP y filtrado de payload PEX |
 | F9 — ciclo de vida y persistencia | Integrado en `d4e988e` y publicado | Fallos de disco, reinicio abrupto, tracker silencioso y cierre de conexiones |
-| F10 — contabilidad de escrituras parciales | Implementado, revisado y validado | Transporte controlado, corrupción/repetición y anuncios locales |
-| F11 — recuperación de metadata persistida | Pendiente | |
+| F10 — contabilidad de escrituras parciales | Integrado en `ead35c1` y publicado | Transporte controlado, corrupción/repetición y anuncios locales |
+| F11 — recuperación de metadata persistida | Implementado, revisado y validado | Entradas visibles, reparación por hash y cero descubrimiento |
 | F12 — pausa y borrado durante inicialización | Pendiente | |
 | F13 — límites al servir metadata | Pendiente | |
 | F14 — secuencia al recibir metadata | Pendiente | |
@@ -127,3 +127,14 @@ La subida contabiliza cada porción de payload que `AsyncWrite` acepta, inmediat
 Self-review: se comprobaron los cruces de cabecera/payload y la ausencia de await entre escribir y contabilizar. Se conservó la política de terminar una trama ya iniciada ante Cancel, cerrando la conexión ante error/timeout. La conversión del incremento a u32 es comprobada. La regresión de pausa detectó que el total visible se reiniciaba; ahora comparte el acumulador del tracker, sin alterar la base de los estimadores de velocidad.
 
 Validación: 41 pruebas del motor pasan (3 ignoradas y 5 E2E excluidas), 54 de aplicación/integración pasan (1 pública ignorada), y Clippy del motor con `-D warnings` pasa. Un transporte controlado cubre cada posición del preámbulo, el primer byte de payload, bloque intermedio/último, éxito, error, WriteZero, timeout, cancelación y mensajes sin payload. El peer TCP repite una subida y confirma totales tras pausa/reanudación. Otro peer local envía primero una pieza corrupta y luego su reemplazo: `downloaded` pasa de 16.384 a 32.768; `left` solo baja de 16.384 a cero después del hash correcto, con `completed` y `stopped` finales coherentes. Las pruebas HTTP/UDP existentes confirman también los contadores de subida en `stopped`. No se usaron trackers externos.
+
+
+## F11: recuperación visible sin resolución implícita
+
+La ausencia, corrupción o sustitución del `.torrent` guardado deja una entrada de error en la biblioteca, conservando ID, nombre (o hash para perfiles antiguos), carpeta y selección. No se convierte a magnet ni impide abrir las entradas sanas. Los archivos internos se leen con límite de 32 MiB, verificación de tipo y, en Unix, apertura no bloqueante sin seguir el enlace final: ni un FIFO ni un enlace sustituido bloquean el arranque. El metainfo debe corresponder al hash persistido.
+
+La tarjeta ofrece **Repair torrent…** para elegir el `.torrent` original. El backend rechaza otro hash antes de tocar datos, conserva ubicación/selección y vuelve a verificar los archivos en pausa. Antes de publicar metadata utilizable se persiste la pausa, de modo que un fallo intermedio no provoque actividad inesperada al reiniciar. Guardado atómico y errores propagados proceden de F9. Una intención pendiente de solo olvidar se completa sin necesitar metadata; una de borrar datos espera la reparación y luego termina el borrado. Los errores de eliminación pendientes son visibles. El backend PostgreSQL actualiza la metadata reparada sin perder la marca de eliminación.
+
+Self-review: se eliminó toda resolución implícita, incluida la previsualización de un magnet cuyo hash ya está en recuperación. Se añadió validación del hash para impedir restaurar un `.torrent` intercambiado. Se comprobó el orden pausa durable → metadata → reemplazo del handle bajo locks, y la convivencia con cierre, altas duplicadas y borrado. La reparación mantiene el factory de almacenamiento configurado. El frontend no ofrece borrar datos de una entrada sin metadata, y los errores muestran una acción de reparación sin volcar contenido bencode o URLs del tracker.
+
+Validación: 57 pruebas de aplicación/integración pasan (1 pública ignorada); 41 del motor pasan (3 ignoradas y 5 E2E excluidas). La matriz cubre ocho daños —ausente, vacío, inválido, hash distinto, tamaño excesivo, directorio, symlink y FIFO— junto a otra entrada sana, reinicio y reparación. Se verifican cero contactos al tracker loopback, rechazo de reparación incorrecta, contenido conservado, ID/carpeta/selección estables, falla real al publicar metadata, pausa persistida y convergencia de borrados pendientes. Una prueba de Core comprueba el snapshot que recibe la biblioteca y la reparación con el archivo seleccionado. Compilación TypeScript/Vite, Clippy con `-D warnings` y compilación del backend PostgreSQL opcional pasan; este último no se probó contra un servidor. No se usó TD.

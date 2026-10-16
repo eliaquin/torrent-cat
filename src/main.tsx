@@ -222,6 +222,16 @@ function App() {
         .catch(() => {});
     }
   }, [data, page]);
+  const repairTorrent = async (t: Torrent) => {
+    try {
+      const path = await open({
+        multiple: false,
+        filters: [{ name: "Original torrent file", extensions: ["torrent"] }],
+      });
+      if (typeof path === "string")
+        await work("Repairing torrent…", () => invoke("repair_metadata", { id: t.id, path }));
+    } catch (error) { report(error); }
+  };
   const exportTorrent = async (t: Torrent) => {
     const path = await save({
       defaultPath: `${t.name}.torrent`,
@@ -447,22 +457,28 @@ function App() {
                         >
                           Stream
                         </Button>
-                        <Button
-                          icon={st === "paused" ? "play_arrow" : "pause"}
-                          title={
-                            st === "paused"
-                              ? "Resume transfer"
-                              : "Pause transfer"
-                          }
-                          onClick={() =>
-                            void work("Updating transfer…", () =>
-                              invoke("torrent_action", {
-                                id: t.id,
-                                action: st === "paused" ? "resume" : "pause",
-                              }),
-                            )
-                          }
-                        />
+                        {t.stats?.metadata_missing ? (
+                          <Button icon="build" onClick={() => void repairTorrent(t)}>
+                            Repair torrent…
+                          </Button>
+                        ) : (
+                          <Button
+                            icon={st === "paused" ? "play_arrow" : "pause"}
+                            title={
+                              st === "paused"
+                                ? "Resume transfer"
+                                : "Pause transfer"
+                            }
+                            onClick={() =>
+                              void work("Updating transfer…", () =>
+                                invoke("torrent_action", {
+                                  id: t.id,
+                                  action: st === "paused" ? "resume" : "pause",
+                                }),
+                              )
+                            }
+                          />
+                        )}
                         <Button
                           icon="list"
                           title="Show files"
@@ -731,6 +747,7 @@ function App() {
             <input
               type="checkbox"
               checked={deleteData}
+              disabled={remove.stats?.metadata_missing}
               onChange={(e) => setDeleteData(e.target.checked)}
             />
             Also permanently delete downloaded data
