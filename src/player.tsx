@@ -608,7 +608,7 @@ export function Player({
             className="playback-speed-control"
             triggerLabel={`${rate}×`}
             tracks={[0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 4, 8, 16].map((r) => ({
-              id: r, name: `${r}×`, detail: r === 1 ? "Normal" : undefined,
+              id: r, name: `${r}×`,
             }))}
             selected={rate}
             onOpenChange={setSpeedMenuOpen}

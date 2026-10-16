@@ -21,6 +21,7 @@ export function TrackMenu({ tracks, selected, disabled, onSelect, onOpenChange, 
   const menu = useRef<HTMLDivElement>(null);
   const id = useId();
   const active = tracks.find((track) => track.id === selected);
+  const speedMenu = label === "Playback speed";
   const heading = label === "Audio" ? "Audio tracks" : label;
   const controlLabel = label === "Audio" ? "Audio track" : label === "Subtitles" ? "Subtitle track" : label;
   const close = () => { setOpen(false); trigger.current?.focus(); };
@@ -65,24 +66,32 @@ export function TrackMenu({ tracks, selected, disabled, onSelect, onOpenChange, 
           onKeyDown={(event) => {
             if (event.key === "Escape") {
               event.preventDefault(); event.stopPropagation(); close();
-            } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+            } else if (["ArrowDown", "ArrowUp", "Home", "End", ...(speedMenu ? ["ArrowLeft", "ArrowRight"] : [])].includes(event.key)) {
               event.preventDefault(); event.stopPropagation();
               const items = Array.from(menu.current?.querySelectorAll<HTMLButtonElement>("[role=menuitemradio], [role=menuitem]") || []);
               const current = items.indexOf(document.activeElement as HTMLButtonElement);
-              const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
-                : (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
-              items[next]?.focus();
+              if (speedMenu && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+                const column = items.filter((_, index) => index % 3 === current % 3);
+                const row = column.indexOf(document.activeElement as HTMLButtonElement);
+                column[(row + (event.key === "ArrowDown" ? 1 : -1) + column.length) % column.length]?.focus();
+              } else {
+                const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+                  : (current + (["ArrowDown", "ArrowRight"].includes(event.key) ? 1 : -1) + items.length) % items.length;
+                items[next]?.focus();
+              }
             } else if (event.key === "Tab") close();
           }}
         >
-          <div className="audio-track-heading" role="presentation"><span>{heading}</span><span>{tracks.length}</span></div>
+          <div className="audio-track-heading" role="presentation"><span>{speedMenu ? "Speed" : heading}</span>{!speedMenu && <span>{tracks.length}</span>}</div>
+          <div className="track-menu-options" role="presentation">
           {tracks.map((track) => (
             <button key={track.id} type="button" role="menuitemradio" aria-checked={track.id === selected}
               tabIndex={-1} onClick={() => { close(); onSelect(track.id); }}>
               <span className="audio-track-copy"><strong>{track.name}</strong>{track.detail && <small>{track.detail}</small>}</span>
-              {track.id === selected && <Icon name="check" />}
+              {!speedMenu && track.id === selected && <Icon name="check" />}
             </button>
           ))}
+          </div>
           {onAddFile && <div className="track-menu-footer" role="presentation">
             <button role="menuitem" tabIndex={-1} type="button" onClick={() => { close(); onAddFile(); }}>
               <Icon name="add" /><span>Add subtitle file…</span>

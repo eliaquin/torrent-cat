@@ -1369,7 +1369,24 @@ input[type="range"] {
 .playback-speed-control .audio-track-menu {
   left: 0;
   right: auto;
-  width: 190px;
+  width: 224px;
+}
+.playback-speed-control .track-menu-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+.playback-speed-control .audio-track-menu button {
+  justify-content: center;
+  min-height: 36px;
+  padding: 8px 4px;
+  border: 1px solid transparent;
+  font-variant-numeric: tabular-nums;
+}
+.playback-speed-control .audio-track-menu button + button { margin-top: 0; }
+.playback-speed-control .audio-track-menu button[aria-checked="true"] {
+  border-color: #71d5e645;
+  color: #a4e6f0;
 }
 .audio-track-trigger {
   display: flex;
@@ -1421,7 +1438,7 @@ input[type="range"] {
   font-weight: 600;
   letter-spacing: .4px;
 }
-.audio-track-heading > span:last-child {
+.audio-track-heading > span + span {
   background: #ffffff0a;
   border-radius: 6px;
   padding: 1px 6px;
