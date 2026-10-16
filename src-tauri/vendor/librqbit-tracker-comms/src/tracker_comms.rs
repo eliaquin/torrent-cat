@@ -38,6 +38,9 @@ pub trait TorrentStatsProvider: Send + Sync {
     fn is_private(&self) -> bool {
         false
     }
+    fn is_metadata_discovery(&self) -> bool {
+        false
+    }
     fn disconnect_for_tracker_switch(&self) -> BoxFuture<'_, anyhow::Result<()>> {
         Box::pin(async { anyhow::bail!("private tracker switching requires peer isolation") })
     }
@@ -115,8 +118,10 @@ impl TrackerComms {
             })
             .filter(|tier: &Vec<_>| !tier.is_empty())
             .collect();
-        for tier in &mut trackers {
-            tier.shuffle(&mut rand::rng());
+        if !stats.is_metadata_discovery() {
+            for tier in &mut trackers {
+                tier.shuffle(&mut rand::rng());
+            }
         }
         if trackers.is_empty() {
             return None;
@@ -185,6 +190,7 @@ impl TrackerComms {
     async fn monitor(&self, mut tiers: Vec<Vec<Url>>) {
         let mut states = std::collections::HashMap::<Url, AnnounceState>::new();
         let mut active: Option<Url> = None;
+        let mut peers_published = false;
         let initially_complete = self.stats.get().is_completed();
         let has_alternatives = tiers.iter().map(Vec::len).sum::<usize>() > 1;
         let mut next = Instant::now();
@@ -226,13 +232,15 @@ impl TrackerComms {
                     continue;
                 }
                 if self.stats.is_private() && active.as_ref().is_some_and(|old| old != &url) {
-                    let result = tokio::select! {
-                        _ = self.cancel.cancelled() => break 'monitor,
-                        r = self.switch_private_peers() => r,
-                    };
-                    if result.is_err() {
-                        break 'monitor;
-                    } // fail closed
+                    if !self.stats.is_metadata_discovery() || peers_published {
+                        let result = tokio::select! {
+                            _ = self.cancel.cancelled() => break 'monitor,
+                            r = self.switch_private_peers() => r,
+                        };
+                        if result.is_err() {
+                            break 'monitor;
+                        } // fail closed
+                    }
                     if let Some(old) = active.as_ref()
                         && let Some(state) = states.get_mut(old)
                     {
@@ -291,6 +299,7 @@ impl TrackerComms {
                         retry = Duration::from_secs(10);
                         next = deadline;
                         for peer in reply.peers {
+                            peers_published = true;
                             tokio::select! {
                                 _ = self.cancel.cancelled() => break 'monitor,
                                 r = self.tx.send(PeerEvent::Peer(peer)) => if r.is_err() { break 'monitor; },
