@@ -193,3 +193,10 @@ Claude CLI revisó el código en modo de solo lectura sobre `d0a2899` (53 turnos
 ### C4: reanudar tras timeout de pausa — confirmado y corregido
 
 Una pausa puede agotar 10 s mientras trabajo síncrono conserva la inicialización. Reanudar ahora espera la salida de esa generación cancelada antes de publicar intención activa o crear descubrimiento. Si sigue detenida, devuelve error y conserva la pausa; no informa una reanudación que terminará sin worker. Self-review: se comprueba de nuevo el cierre de sesión después de esperar. La regresión usa reloj simulado y conserva explícitamente guard/registro de tarea más allá del plazo; resume permanece pendiente hasta liberarlos y entonces llega a Live. Pasa junto con Clippy y la suite del motor.
+
+
+### C1: UDP silencioso delante de respaldos — confirmado y corregido
+
+Con varias URLs, cada candidato UDP dispone de 45 s (reintentos internos de 15/30 s) antes de pasar al siguiente. Un UDP fallido entra en cooldown progresivo de 60 s a una hora; no bloquea cada nuevo intervalo del respaldo. Un único tracker mantiene la recuperación completa de F7. Self-review: el cooldown se limita a este caso UDP, conservando el orden y la recuperación HTTP existente. La afirmación de Claude sobre `stopped` se descartó: cancelación y presupuesto final independiente ya lo acotaban.
+
+Una regresión con reloj simulado, UDP silencioso en primer nivel y HTTP funcional en segundo confirma acceso al respaldo tras 45 s y anuncios posteriores sin volver a bloquearse en el primario. Pasan las 20 pruebas de tracker (1 pública ignorada) y Clippy con `-D warnings`.

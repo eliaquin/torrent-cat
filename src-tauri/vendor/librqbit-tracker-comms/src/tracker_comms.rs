@@ -73,6 +73,8 @@ struct AnnounceState {
     started: bool,
     attempted: bool,
     completed: bool,
+    failures: u32,
+    retry_after: Option<Instant>,
 }
 
 pub struct TrackerComms {
@@ -184,6 +186,7 @@ impl TrackerComms {
         let mut states = std::collections::HashMap::<Url, AnnounceState>::new();
         let mut active: Option<Url> = None;
         let initially_complete = self.stats.get().is_completed();
+        let has_alternatives = tiers.iter().map(Vec::len).sum::<usize>() > 1;
         let mut next = Instant::now();
         let mut retry = Duration::from_secs(10);
         let mut retrying = false;
@@ -215,6 +218,13 @@ impl TrackerComms {
                 if self.cancel.is_cancelled() {
                     break 'monitor;
                 }
+                if states
+                    .get(&url)
+                    .and_then(|s| s.retry_after)
+                    .is_some_and(|at| Instant::now() < at)
+                {
+                    continue;
+                }
                 if self.stats.is_private() && active.as_ref().is_some_and(|old| old != &url) {
                     let result = tokio::select! {
                         _ = self.cancel.cancelled() => break 'monitor,
@@ -245,15 +255,24 @@ impl TrackerComms {
                     Event::Update
                 };
                 state.attempted = true;
+                // A silent UDP endpoint must not monopolize a multi-tracker
+                // torrent. Single-endpoint sessions retain the full BEP 15 loop.
+                let budget = Duration::from_secs(match (url.scheme(), has_alternatives) {
+                    ("udp", true) => 45,
+                    ("udp", false) => 16000,
+                    _ => 10,
+                });
                 let result = tokio::select! {
                     _ = self.cancel.cancelled() => break 'monitor,
-                    r = timeout(if url.scheme() == "udp" { Duration::from_secs(16000) } else { Duration::from_secs(10) }, self.request(&url, event, state.tracker_id.as_deref())) => r.unwrap_or_else(|_| Err(anyhow::anyhow!("tracker request timed out"))),
+                    r = timeout(budget, self.request(&url, event, state.tracker_id.as_deref())) => r.unwrap_or_else(|_| Err(anyhow::anyhow!("tracker request timed out"))),
                 }.and_then(|reply| {
                     let deadline = checked_deadline(reply.interval, self.force_tracker_interval)?;
                     Ok((reply, deadline))
                 });
                 match result {
                     Ok((reply, deadline)) => {
+                        state.failures = 0;
+                        state.retry_after = None;
                         if reply.tracker_id.is_some() {
                             state.tracker_id = reply.tracker_id;
                         }
@@ -281,6 +300,12 @@ impl TrackerComms {
                         break;
                     }
                     Err(error) => {
+                        if url.scheme() == "udp" && has_alternatives {
+                            state.failures = state.failures.saturating_add(1).min(7);
+                            let cooldown =
+                                Duration::from_secs((60u64 << (state.failures - 1)).min(3600));
+                            state.retry_after = Some(Instant::now() + cooldown);
+                        }
                         tracing::debug!(%error, "tracker announce failed");
                     }
                 }
@@ -557,6 +582,71 @@ mod failover_tests {
             })
         }
     }
+    #[tokio::test(start_paused = true)]
+    async fn silent_udp_yields_to_http_tier_and_is_not_retried_each_interval() {
+        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let good = HttpTracker::new().await;
+        let cancel = CancellationToken::new();
+        let tasks = TaskTracker::new();
+        let udp = UdpTrackerClient::new(cancel.clone(), None).await.unwrap();
+        let mut stream = TrackerComms::start(
+            Id20::default(),
+            Id20::default(),
+            vec![
+                vec![
+                    Url::parse(&format!("udp://{}/announce", silent.local_addr().unwrap()))
+                        .unwrap(),
+                ],
+                vec![good.url.clone()],
+            ],
+            Box::new(()),
+            None,
+            1234,
+            reqwest::Client::new(),
+            udp,
+            tasks.clone(),
+        )
+        .unwrap();
+        let consumer = tokio::spawn(async move { while stream.next().await.is_some() {} });
+        let mut packet = [0; 1500];
+        silent.recv_from(&mut packet).await.unwrap();
+        tokio::time::advance(Duration::from_secs(15)).await;
+        silent.recv_from(&mut packet).await.unwrap();
+        tokio::time::advance(Duration::from_secs(30)).await;
+        for _ in 0..2000 {
+            if good.requests.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            good.requests.load(Ordering::SeqCst) > 0,
+            "backup must be reached after the 45-second candidate budget"
+        );
+        // Drain any packet at the exact timeout boundary, then check cooldown.
+        while silent.try_recv_from(&mut packet).is_ok() {}
+        let initial = good.requests.load(Ordering::SeqCst);
+        for _ in 0..10 {
+            for _ in 0..100 {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert!(good.requests.load(Ordering::SeqCst) > initial);
+        assert!(
+            silent.try_recv_from(&mut packet).is_err(),
+            "failed primary must cool down while backup remains useful"
+        );
+        consumer.abort();
+        let _ = consumer.await;
+        tasks.close();
+        tasks.wait().await;
+        cancel.cancel();
+    }
+
     #[tokio::test]
     async fn successful_tracker_is_promoted_within_its_tier() {
         let bad = HttpTracker::new().await;
