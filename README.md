@@ -4,7 +4,7 @@ A macOS app for downloading and streaming torrents, built with Tauri, Rust, Reac
 
 ## Features
 
-- Open torrent files, magnet links, info hashes and torrent URLs.
+- Open torrent files, magnet links with explicit trackers, and torrent URLs.
 - Set TorrentCat as the default app for `.torrent` files and magnet links in Preferences → General.
 - Download, seed, pause, resume and select individual files.
 - Play media while it downloads, with seeking, subtitles and saved playback positions.
@@ -50,6 +50,7 @@ Downloads use the folder selected in Preferences. Generated media caches current
 
 ## Limitations
 
+- Private torrents require the tracker-issued `.torrent` file. They use one tracker, without automatic failover, DHT, peer exchange or local discovery.
 - WebRTC/browser-only peers are unsupported. Web seeds and NAT-PMP need further validation.
 - Built-in playback depends on WKWebView codec support. Audio conversion preserves the video codec; unsupported video formats require VLC or another player.
 - Thumbnails and metadata require a completed file. Bitmap subtitles cannot be converted to text.

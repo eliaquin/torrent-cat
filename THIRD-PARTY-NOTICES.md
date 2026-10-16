@@ -23,6 +23,10 @@ License: [Apache 2.0](licenses/Apache-2.0.txt)
 
 VLC and FFmpeg are discovered on the user's machine and are not redistributed in this app bundle. Their licenses and build configurations are provided by their respective installations.
 
+## Patched torrent engine
+
+`src-tauri/vendor/` contains modified copies of librqbit and librqbit-tracker-comms 9.0.1 by the rqbit contributors, licensed under Apache-2.0. Source provenance and changes are recorded in [the vendor notes](src-tauri/vendor/README.md); each crate includes its license.
+
 ## Dependency licenses
 
 Exact Rust and JavaScript dependencies are recorded in `src-tauri/Cargo.lock` and `package-lock.json`. Before distributing a public release, generate a complete dependency license inventory for that release, include required notices, and review any distribution-specific obligations.

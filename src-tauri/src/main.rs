@@ -11,6 +11,8 @@ mod notifications;
 mod piece_map;
 mod playback;
 mod power;
+#[cfg(test)]
+mod tracker_tests;
 mod watcher;
 use core::{Core, Preferences};
 use librqbit::api::TorrentIdOrHash;

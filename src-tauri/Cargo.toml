@@ -54,3 +54,7 @@ codegen-units = 1
 # `tauri build` sets, produces Mach-O files (proc macros and the app itself)
 # that dyld rejects with "mis-aligned LINKEDIT string pool".
 strip = false
+
+[patch.crates-io]
+librqbit = { path = "vendor/librqbit" }
+librqbit-tracker-comms = { path = "vendor/librqbit-tracker-comms" }

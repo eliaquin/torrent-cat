@@ -75,3 +75,16 @@ This audit establishes the requested local Mac app and researched implementation
 
 - Library previews select the largest video by file size and wait until that file is complete. Completed samples do not override it. Existing poster caches are keyed by source file, so another video's cached image is not reused.
 - Four library regression tests cover file ordering, larger non-video files, an incomplete main video with a complete sample, missing metadata/progress, audio-only torrents, single videos and equal-size ties.
+
+
+## Private tracker accounting and privacy — 2026-10-16
+
+- `cargo test --manifest-path src-tauri/Cargo.toml`: **29 passed, 0 failed, 1 ignored**. The ignored test accesses a public swarm and was not run. TypeScript and the Vite production build also pass.
+- Nine regressions in `src-tauri/src/tracker_tests.rs` use temporary synthetic files, HTTP/UDP trackers and peers on loopback. No TD account, passkey or public tracker is used.
+- For a 32 KiB private torrent with 16 KiB already on disk and only that file selected, the tracker receives `downloaded=0, left=16384`. After enabling the other file and downloading from a local seed, it receives `downloaded=16384, left=0`; the seed reports `uploaded=16384`.
+- HTTP and UDP produce one `started` per run, periodic updates without repeated lifecycle events, one `completed` for the full download, and `stopped` before pause/removal/shutdown return. Pause/resume preserves transfer counters and the announce key. Existing complete data does not generate a completion event.
+- HTTP tests verify both interval/minimum-interval orderings, preservation of the fixture passkey and round-tripping a tracker ID containing reserved URL characters. Duplicate tracker sources produce a single announce stream. An unresponsive tracker cannot indefinitely block pause; shutdown also cancels unresolved magnet discovery and sends `stopped`.
+- Private torrents ignore global/custom trackers and manually supplied peers, even with only one tracker in the metadata. Tracker failures back off without trying another tracker. Private peer handshakes disable PEX and metadata sharing. A local DHT positive control observes a public hash and never the private hash. LSD remains excluded by the private discovery branch; the tests disable multicast to avoid LAN traffic.
+- Playback priority continues to pause other incomplete downloads, but completed seeds remain active. Explicit user pauses and recovery after restart remain covered.
+
+Private torrents require the tracker-issued `.torrent` file. Unknown magnets use an explicit tracker only, without DHT/LSD/PEX; magnets that resolve to private metadata are rejected. Private tracker failover is intentionally disabled until old-peer isolation is implemented. Final announces are bounded, best effort when the tracker is unavailable. Local tests do not establish approval by TD.

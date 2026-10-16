@@ -1,5 +1,5 @@
 //! Transfer priority is separate from piece selection: an incomplete playing
-//! torrent can temporarily suspend the other active transfers, as in the fork.
+//! torrent can temporarily suspend other downloads while keeping seeders active.
 use crate::core::Core;
 use anyhow::{Context, Result};
 use librqbit::{
@@ -32,10 +32,9 @@ impl Core {
             let Some(other) = torrent.id.filter(|other| *other != id) else {
                 continue;
             };
-            if !torrent
-                .stats
-                .is_some_and(|stats| matches!(stats.state, TorrentStatsState::Live))
-            {
+            if !torrent.stats.is_some_and(|stats| {
+                matches!(stats.state, TorrentStatsState::Live) && !stats.finished
+            }) {
                 continue;
             }
             // Journal before changing engine state. A crash after this write is

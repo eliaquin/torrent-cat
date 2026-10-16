@@ -183,7 +183,7 @@ async fn create_seed_download_stream_select_resume_and_remove() {
         .create(
             source.to_string_lossy().into(),
             metadata.to_string_lossy().into(),
-            true,
+            false,
             "Integration fixture".into(),
             vec!["http://127.0.0.1:1/announce".into()],
         )
@@ -196,7 +196,7 @@ async fn create_seed_download_stream_select_resume_and_remove() {
         .unwrap()
         .unwrap();
     let torrent = lava_torrent::torrent::v1::Torrent::read_from_file(&metadata).unwrap();
-    assert!(torrent.is_private());
+    assert!(!torrent.is_private());
     assert!(format!("{:?}", torrent.extra_fields).contains("Integration fixture"));
     let download_dir = root.path().join("downloads");
     std::fs::create_dir(&download_dir).unwrap();
@@ -535,7 +535,7 @@ async fn playback_priority_restores_only_automatic_pauses_and_recovers_after_res
     let core = Core::new(core_path.clone(), true).await.unwrap();
     let mut ids = Vec::new();
     let mut metadata = Vec::new();
-    for n in 0..3 {
+    for n in 0..4 {
         let source = root.path().join(format!("source-{n}.mp4"));
         std::fs::write(&source, vec![n as u8 + 1; 8192]).unwrap();
         let torrent = root.path().join(format!("source-{n}.torrent"));
@@ -590,6 +590,27 @@ async fn playback_priority_restores_only_automatic_pauses_and_recovers_after_res
         .unwrap()["id"]
         .as_u64()
         .unwrap() as usize;
+    // Another incomplete download may be suspended, but a completed private seed must stay live.
+    core.action(ids[1], "remove").await.unwrap();
+    let other_download = root.path().join("other-download");
+    std::fs::create_dir(&other_download).unwrap();
+    ids[1] = core
+        .add(
+            metadata[1].to_string_lossy().into(),
+            Some(other_download.to_string_lossy().into()),
+            false,
+            false,
+        )
+        .await
+        .unwrap()["id"]
+        .as_u64()
+        .unwrap() as usize;
+    core.api
+        .mgr_handle(TorrentIdOrHash::Id(ids[1]))
+        .unwrap()
+        .wait_until_initialized()
+        .await
+        .unwrap();
     core.action(ids[2], "pause").await.unwrap();
     core.start_playback(playing, 0).await.unwrap();
     assert!(matches!(
@@ -599,6 +620,16 @@ async fn playback_priority_restores_only_automatic_pauses_and_recovers_after_res
             .state,
         librqbit::TorrentStatsState::Paused
     ));
+    assert!(
+        matches!(
+            core.api
+                .api_stats_v1(TorrentIdOrHash::Id(ids[3]))
+                .unwrap()
+                .state,
+            librqbit::TorrentStatsState::Live
+        ),
+        "Playback must not suspend completed private seeds"
+    );
     assert_eq!(core.profile.lock().await.suspended_for_playback.len(), 1);
     core.restore_playback_transfers().await.unwrap();
     assert!(matches!(
