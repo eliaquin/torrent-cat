@@ -571,7 +571,12 @@ impl ManagedTorrent {
                 .unwrap_or_default(),
             file_progress: Vec::new(),
             state: S::Error,
-            error: None,
+            error: self
+                .shared
+                .deleting
+                .load(Ordering::Acquire)
+                .then(|| "Removal is pending. Retry Remove to finish.".into()),
+            metadata_missing: self.metadata.load().is_none(),
             progress_bytes: 0,
             uploaded_bytes: self.shared.tracker_uploaded.load(Ordering::Relaxed),
             finished: false,

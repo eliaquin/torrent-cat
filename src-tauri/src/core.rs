@@ -193,24 +193,7 @@ impl Core {
         let prefs = self.profile.lock().await.prefs.clone();
         let address = normalize_address(&address)?;
         let source = if Path::new(&address).is_absolute() {
-            let meta = tokio::fs::metadata(&address).await?;
-            if meta.len() > 32 * 1024 * 1024 {
-                bail!("Torrent metadata is too large");
-            }
-            use tokio::io::AsyncReadExt;
-            if !meta.is_file() {
-                bail!("Torrent metadata must be a regular file");
-            }
-            let mut bytes = Vec::new();
-            tokio::fs::File::open(&address)
-                .await?
-                .take(32 * 1024 * 1024 + 1)
-                .read_to_end(&mut bytes)
-                .await?;
-            if bytes.len() > 32 * 1024 * 1024 {
-                bail!("Torrent metadata is too large");
-            }
-            AddTorrent::TorrentFileBytes(bytes.into())
+            AddTorrent::TorrentFileBytes(read_torrent_metadata(Path::new(&address)).await?.into())
         } else {
             AddTorrent::Url(address.into())
         };
@@ -283,6 +266,12 @@ impl Core {
         self.record_added(&response.details.info_hash).await?;
         Ok(serde_json::to_value(response)?)
     }
+    pub async fn repair_metadata(&self, id: usize, path: PathBuf) -> Result<()> {
+        let _transition = self.playback_transition.lock().await;
+        let bytes = read_torrent_metadata(&path).await?;
+        self.api.session().repair_metadata(id, bytes.into()).await
+    }
+
     pub async fn action(&self, id: usize, action: &str) -> Result<()> {
         let _transition = self.playback_transition.lock().await;
         let key = TorrentIdOrHash::Id(id);
@@ -490,6 +479,30 @@ impl Core {
         }
         Ok(json!({"imported":imported,"errors":errors}))
     }
+}
+
+async fn read_torrent_metadata(path: &Path) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "macos")]
+    options.custom_flags(libc::O_NONBLOCK);
+    let file = options.open(path).await?;
+    let meta = file.metadata().await?;
+    anyhow::ensure!(meta.is_file(), "Torrent metadata must be a regular file");
+    anyhow::ensure!(
+        meta.len() <= 32 * 1024 * 1024,
+        "Torrent metadata is too large"
+    );
+    let mut bytes = Vec::new();
+    file.take(32 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .await?;
+    anyhow::ensure!(
+        bytes.len() <= 32 * 1024 * 1024,
+        "Torrent metadata is too large"
+    );
+    Ok(bytes)
 }
 
 pub async fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {

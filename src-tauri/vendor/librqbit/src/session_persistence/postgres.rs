@@ -43,6 +43,8 @@ impl TorrentsTableRecord {
                     .map(|v| v.into_iter().map(|v| v as usize).collect()),
                 is_paused: self.is_paused,
                 pending_delete: self.pending_delete,
+                name: None,
+                metadata_error: None,
             },
         ))
     }
@@ -107,7 +109,10 @@ impl SessionPersistenceStore for PostgresSessionStorage {
             .unwrap_or_default();
         let q = "INSERT INTO torrents (id, info_hash, torrent_bytes, trackers, output_folder, only_files, is_paused)
         VALUES($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT(id) DO NOTHING";
+        ON CONFLICT(id) DO UPDATE SET torrent_bytes = EXCLUDED.torrent_bytes,
+        trackers = EXCLUDED.trackers, output_folder = EXCLUDED.output_folder,
+        only_files = EXCLUDED.only_files,
+        is_paused = CASE WHEN torrents.pending_delete IS NOT NULL THEN TRUE ELSE EXCLUDED.is_paused END";
         sqlx::query(q)
             .bind::<i32>(id.try_into()?)
             .bind(&torrent.info_hash().0[..])

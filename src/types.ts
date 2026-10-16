@@ -23,6 +23,7 @@ export type Torrent = {
     total_bytes: number;
     file_progress: number[];
     error?: string;
+    metadata_missing?: boolean;
     live?: {
       download_speed: { mbps: number };
       upload_speed: { mbps: number };

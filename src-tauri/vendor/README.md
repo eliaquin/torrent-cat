@@ -34,6 +34,9 @@ TorrentCat modifications:
 - Send HTTP/UDP lifecycle events and await bounded stopped requests on pause,
   removal and shutdown. Respect both tracker interval and minimum interval;
   retain and safely encode HTTP tracker IDs.
+- Retain missing/invalid saved metainfo as visible paused recovery entries, with
+  bounded regular-file reads and no implicit magnet discovery. Repair only from
+  matching metainfo, preserving IDs, selection, output paths and pending removal.
 - Preserve announce tiers, shuffle and promote successful URLs within each tier.
   Private failover waits for old peers to disconnect and discards their queued
   connections/retries; no global/custom trackers, initial peers, DHT, LSD, PEX

@@ -792,3 +792,56 @@ async fn public_swarm_download_smoke() {
     core.api.session().stop().await;
     assert!(outcome.unwrap().unwrap() >= 2 * 1024 * 1024);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn library_snapshot_retains_missing_metadata_and_repairs_original_entry() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    let core = Core::new(profile.clone(), true).await.unwrap();
+    let source = root.path().join("movie.mp4");
+    std::fs::write(&source, vec![42; 16384]).unwrap();
+    let original = root.path().join("original.torrent");
+    let added = core
+        .create(
+            source.to_string_lossy().into(),
+            original.to_string_lossy().into(),
+            false,
+            String::new(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    let id = added["id"].as_u64().unwrap() as usize;
+    let hash = added["details"]["info_hash"].as_str().unwrap();
+    core.action(id, "pause").await.unwrap();
+    core.media.shutdown().await;
+    core.api.session().stop().await;
+    std::fs::remove_file(profile.join("engine").join(format!("{hash}.torrent"))).unwrap();
+    let reopened = timeout(Duration::from_secs(3), Core::new(profile, true))
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot = reopened.snapshot().await.unwrap();
+    let entry = &snapshot["torrents"][0];
+    assert_eq!(entry["id"], id);
+    assert_eq!(entry["name"], "movie.mp4");
+    assert_eq!(entry["stats"]["metadata_missing"], true);
+    assert!(
+        entry["stats"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Repair torrent")
+    );
+    reopened.repair_metadata(id, original).await.unwrap();
+    let h = reopened.api.session().get(id.into()).unwrap();
+    h.wait_until_initialized().await.unwrap();
+    let snapshot = reopened.snapshot().await.unwrap();
+    let entry = &snapshot["torrents"][0];
+    assert_eq!(entry["id"], id);
+    assert_eq!(entry["stats"]["metadata_missing"], false);
+    assert_eq!(entry["stats"]["state"], "paused");
+    assert_eq!(entry["files"][0]["name"], "movie.mp4");
+    assert_eq!(std::fs::read(source).unwrap(), vec![42; 16384]);
+    reopened.media.shutdown().await;
+    reopened.api.session().stop().await;
+}
