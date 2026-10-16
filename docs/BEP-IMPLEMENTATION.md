@@ -200,3 +200,10 @@ Una pausa puede agotar 10 s mientras trabajo síncrono conserva la inicializaci�
 Con varias URLs, cada candidato UDP dispone de 45 s (reintentos internos de 15/30 s) antes de pasar al siguiente. Un UDP fallido entra en cooldown progresivo de 60 s a una hora; no bloquea cada nuevo intervalo del respaldo. Un único tracker mantiene la recuperación completa de F7. Self-review: el cooldown se limita a este caso UDP, conservando el orden y la recuperación HTTP existente. La afirmación de Claude sobre `stopped` se descartó: cancelación y presupuesto final independiente ya lo acotaban.
 
 Una regresión con reloj simulado, UDP silencioso en primer nivel y HTTP funcional en segundo confirma acceso al respaldo tras 45 s y anuncios posteriores sin volver a bloquearse en el primario. Pasan las 20 pruebas de tracker (1 pública ignorada) y Clippy con `-D warnings`.
+
+
+### C2: fallback de magnets sin peers previos — confirmado y corregido
+
+La resolución conserva el orden de `tr` y puede pasar al siguiente tracker mientras ningún tracker haya publicado un peer. Sigue finalizando el tracker previo antes de cambiar. Una vez encolado el primer peer, exige la barrera de aislamiento anterior; sin torrent administrado, falla cerrada. No se habilitan DHT/LSD/PEX, trackers globales ni peers iniciales para hashes desconocidos. Self-review: se separó el permiso de omitir una desconexión vacía de la obligación de finalizar el tracker anterior.
+
+La regresión local completa un magnet con primer tracker HTTP 503 y segundo conectado a un seeder; comprueba el orden. El caso negativo recibe un peer, falla después el tracker y confirma cero contactos al respaldo. Pasan esa prueba, las 20 de tracker (1 ignorada) y Clippy con `-D warnings`.

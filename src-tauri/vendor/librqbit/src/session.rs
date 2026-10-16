@@ -1370,6 +1370,7 @@ impl Session {
             .transpose()?
             .unwrap_or_else(|| vec![trackers.clone()]);
 
+        let metadata_discovery = metadata.is_none();
         let make_peer_rx = || {
             self.make_peer_rx(
                 info_hash,
@@ -1378,6 +1379,7 @@ impl Session {
                 opts.force_tracker_interval,
                 opts.initial_peers.clone().unwrap_or_default(),
                 private,
+                metadata_discovery,
             )
         };
 
@@ -1420,6 +1422,7 @@ impl Session {
                             true,
                             opts.force_tracker_interval,
                             seen_peers.clone(),
+                            false,
                             false,
                         )
                     } else {
@@ -1834,10 +1837,12 @@ impl Session {
             t.shared().options.force_tracker_interval,
             t.shared().options.initial_peers.clone(),
             is_private,
+            false,
         )
     }
 
     // Get a peer stream from both DHT and trackers.
+    #[allow(clippy::too_many_arguments)]
     fn make_peer_rx(
         self: &Arc<Self>,
         info_hash: Id20,
@@ -1846,6 +1851,7 @@ impl Session {
         force_tracker_interval: Option<Duration>,
         initial_peers: Vec<SocketAddr>,
         is_private: bool,
+        metadata_discovery: bool,
     ) -> Option<PeerStream> {
         let dht_rx = if is_private {
             None
@@ -1884,6 +1890,7 @@ impl Session {
             session: self.clone(),
             cached: RwLock::new(None),
             private: is_private,
+            metadata_discovery,
         };
         let tracker_rx = TrackerComms::start(
             info_hash,
@@ -2235,9 +2242,13 @@ struct PeerRxTorrentInfo {
     // Retain final stats for the stopped announce even after removal from the database.
     cached: RwLock<Option<ManagedTorrentHandle>>,
     private: bool,
+    metadata_discovery: bool,
 }
 
 impl tracker_comms::TorrentStatsProvider for PeerRxTorrentInfo {
+    fn is_metadata_discovery(&self) -> bool {
+        self.metadata_discovery
+    }
     fn is_private(&self) -> bool {
         self.private
     }

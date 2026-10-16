@@ -48,8 +48,8 @@ TorrentCat modifications:
   connections/retries; no global/custom trackers, initial peers, DHT, LSD, PEX
   or metadata sharing for private torrents.
 - Resolve unknown magnets through an explicit tracker only; require the original
-  `.torrent` file for private torrents. Unknown magnets cannot switch trackers
-  before peer isolation is available.
+  `.torrent` file for private torrents. Unknown magnets may try fallback trackers only before any peer was published;
+  after that, switching requires peer isolation.
 - Apply additive extension updates and zero-ID disablement. Keep one PEX worker
   per peer, avoid timer catch-up bursts and filter local contacts before encoding.
 - Avoid logging tracker URLs, passkeys or tracker failure text in announce errors.

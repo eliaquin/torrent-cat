@@ -1234,3 +1234,81 @@ async fn corrupt_then_repeated_download_counts_wire_bytes_but_left_tracks_verifi
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn magnet_tries_next_tracker_only_before_any_peers_were_published() {
+    let bad = Tracker::http(1, 1).await;
+    let good = Tracker::http(60, 60).await;
+    bad.state.lock().unwrap().reject = true;
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("seed");
+    std::fs::create_dir_all(&source).unwrap();
+    let file = source.join("payload.bin");
+    std::fs::write(&file, vec![7; 16384]).unwrap();
+    let mut bytes = Vec::new();
+    lava_torrent::torrent::v1::TorrentBuilder::new(&file, 16384)
+        .set_num_threads(1)
+        .set_announce(Some(good.url.clone()))
+        .build()
+        .unwrap()
+        .write_into(&mut bytes)
+        .unwrap();
+    let seeder = session(&source, None).await;
+    let seed = add(&seeder, &bytes, &source, None, vec![], vec![]).await;
+    good.wait(|r| !r.is_empty()).await;
+    good.state.lock().unwrap().peers = vec![seeder.listen_addr().unwrap()];
+    good.state.lock().unwrap().requests.clear();
+    let client = session(&root.path().join("download"), None).await;
+    let magnet = format!(
+        "magnet:?xt=urn:btih:{}&tr={}&tr={}",
+        seed.info_hash().as_string(),
+        url::form_urlencoded::byte_serialize(bad.url.as_bytes()).collect::<String>(),
+        url::form_urlencoded::byte_serialize(good.url.as_bytes()).collect::<String>()
+    );
+    let h = timeout(
+        Duration::from_secs(10),
+        client.add_torrent(AddTorrent::from_url(&magnet), None),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .into_handle()
+    .unwrap();
+    assert_eq!(h.info_hash(), seed.info_hash());
+    assert!(
+        bad.records()[0].at <= good.records()[0].at,
+        "discovery preserves the supplied tracker order"
+    );
+    client.stop().await;
+    seeder.stop().await;
+
+    // Once a tracker supplied a peer, unknown metadata still requires an
+    // isolation barrier. We cannot establish that barrier before it is managed.
+    let primary = Tracker::http(1, 1).await;
+    let backup = Tracker::http(1, 1).await;
+    let peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    primary.state.lock().unwrap().peers = vec![peer.local_addr().unwrap()];
+    let client = session(&root.path().join("unknown"), None).await;
+    let magnet = format!(
+        "magnet:?xt=urn:btih:{}&tr={}&tr={}",
+        "21".repeat(20),
+        url::form_urlencoded::byte_serialize(primary.url.as_bytes()).collect::<String>(),
+        url::form_urlencoded::byte_serialize(backup.url.as_bytes()).collect::<String>()
+    );
+    let s = client.clone();
+    let resolving =
+        tokio::spawn(async move { s.add_torrent(AddTorrent::from_url(&magnet), None).await });
+    let (_connection, _) = timeout(Duration::from_secs(3), peer.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    primary.state.lock().unwrap().reject = true;
+    primary.wait(|r| r.len() >= 2).await;
+    sleep(Duration::from_millis(250)).await;
+    assert!(
+        backup.records().is_empty(),
+        "must not mix peer sources before privacy/isolation is known"
+    );
+    client.stop().await;
+    assert!(resolving.await.unwrap().is_err());
+}
