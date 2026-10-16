@@ -61,7 +61,7 @@ pub trait PeerConnectionHandler {
 pub(crate) enum WriterRequest {
     Message(Message<'static>),
     UtMetadata(UtMetadata<ByteBufOwned>),
-    UtPex(UtPex<ByteBufOwned>),
+    UtPex(UtPex<ByteBufOwned>, tokio::sync::oneshot::Sender<bool>),
     ReadChunkRequest(crate::upload_queue::UploadRequest),
     Disconnect(anyhow::Result<()>),
 }
@@ -311,6 +311,13 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
             .read_write_timeout
             .unwrap_or_else(|| Duration::from_secs(10));
 
+        // Idle peers normally send keepalives every two minutes. Preserve the
+        // short write/handshake timeout without dropping quiet established peers.
+        let read_timeout = self
+            .options
+            .read_write_timeout
+            .unwrap_or(Duration::from_secs(180));
+
         let extended_handshake: RwLock<Option<PeerExtendedMessageIds>> = RwLock::new(None);
         let extended_handshake_ref = &extended_handshake;
         let supports_extended = handshake_supports_extended;
@@ -388,23 +395,43 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
 
                 let mut uploaded_add = None;
                 let mut upload_guard = None;
+                let mut pex_reply = None;
 
                 trace!("about to send: {:?}", &req);
-                let ext_msg_ids = &|| {
-                    extended_handshake_ref
-                        .read()
-                        .as_ref()
-                        .map(|e| *e)
-                        .unwrap_or_default()
-                };
+                let negotiated = extended_handshake_ref
+                    .read()
+                    .as_ref()
+                    .copied()
+                    .unwrap_or_default();
+                let ext_msg_ids = &|| negotiated;
 
                 let len = match req {
-                    WriterRequest::Message(msg) => msg.serialize(&mut *write_buf, ext_msg_ids)?,
+                    WriterRequest::Message(msg) => {
+                        if matches!(&msg, Message::Extended(ExtendedMessage::UtMetadata(_)))
+                            && negotiated.ut_metadata.is_none()
+                        {
+                            continue;
+                        }
+                        if matches!(&msg, Message::Extended(ExtendedMessage::UtPex(_)))
+                            && negotiated.ut_pex.is_none()
+                        {
+                            continue;
+                        }
+                        msg.serialize(&mut *write_buf, ext_msg_ids)?
+                    }
                     WriterRequest::UtMetadata(utm) => {
+                        if negotiated.ut_metadata.is_none() {
+                            continue;
+                        }
                         Message::Extended(ExtendedMessage::UtMetadata(utm.as_borrowed()))
                             .serialize(&mut *write_buf, ext_msg_ids)?
                     }
-                    WriterRequest::UtPex(ut_pex) => {
+                    WriterRequest::UtPex(ut_pex, reply) => {
+                        if negotiated.ut_pex.is_none() {
+                            let _ = reply.send(false);
+                            continue;
+                        }
+                        pex_reply = Some(reply);
                         Message::Extended(ExtendedMessage::UtPex(ut_pex.as_borrowed()))
                             .serialize(&mut *write_buf, ext_msg_ids)?
                     }
@@ -483,6 +510,9 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
                 if let Some(uploaded_add) = uploaded_add {
                     self.handler.on_uploaded_bytes(uploaded_add)
                 }
+                if let Some(reply) = pex_reply {
+                    let _ = reply.send(true);
+                }
                 drop(upload_guard);
             }
 
@@ -493,13 +523,17 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
 
         let reader = async move {
             loop {
-                let message = read_buf.read_message(&mut read, rwtimeout).await?;
+                let message = read_buf.read_message(&mut read, read_timeout).await?;
                 trace!("received: {:?}", &message);
 
                 tokio::task::yield_now().await;
 
                 if let Message::Extended(ExtendedMessage::Handshake(h)) = &message {
-                    *extended_handshake_ref.write() = Some(h.peer_extended_messages());
+                    extended_handshake_ref
+                        .write()
+                        .get_or_insert_with(Default::default)
+                        .apply_update(h.peer_extended_messages())
+                        .map_err(Error::Anyhow)?;
                     self.handler
                         .on_extended_handshake(h)
                         .map_err(Error::Anyhow)?;
