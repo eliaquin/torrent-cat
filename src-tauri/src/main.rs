@@ -9,6 +9,7 @@ mod native;
 mod notifications;
 mod piece_map;
 mod playback;
+mod power;
 mod watcher;
 use core::{Core, Preferences};
 use librqbit::api::TorrentIdOrHash;
@@ -29,7 +30,7 @@ fn err(e: impl std::fmt::Display) -> String {
 struct AppState {
     core: Arc<Core>,
     inputs: std::sync::Mutex<inbox::Inbox>,
-    power: tokio::sync::Mutex<Option<tokio::process::Child>>,
+    power: tokio::sync::Mutex<power::PlaybackPower>,
 }
 #[tauri::command]
 async fn snapshot(s: tauri::State<'_, AppState>) -> Cmd<Value> {
@@ -105,25 +106,24 @@ async fn save_position(s: tauri::State<'_, AppState>, key: String, position: f64
 }
 #[tauri::command]
 async fn stream_file(s: tauri::State<'_, AppState>, id: usize, index: usize) -> Cmd<String> {
+    // Serialize the complete start/stop transition so a pending start cannot
+    // acquire a new assertion after stop_stream has already released it.
+    let mut power = s.power.lock().await;
+    power.ensure_open().map_err(err)?;
     s.core.start_playback(id, index).await.map_err(err)?;
     s.core.media.revoke_all().await;
-    let mut power = s.power.lock().await;
-    if power.is_none() {
-        *power = tokio::process::Command::new("/usr/bin/caffeinate")
-            .args(["-d", "-i"])
-            .kill_on_drop(true)
-            .spawn()
-            .ok();
+    if let Err(error) = power.acquire() {
+        eprintln!("Unable to prevent sleep during playback: {error}");
     }
     Ok(s.core.media.grant(media::Source::Torrent(id, index)).await)
 }
 #[tauri::command]
 async fn stop_stream(s: tauri::State<'_, AppState>) -> Cmd<()> {
+    let mut power = s.power.lock().await;
+    let released = power.release().await.map_err(err);
     s.core.media.revoke_all().await;
-    if let Some(mut child) = s.power.lock().await.take() {
-        let _ = child.kill().await;
-    }
-    s.core.restore_playback_transfers().await.map_err(err)
+    s.core.restore_playback_transfers().await.map_err(err)?;
+    released
 }
 #[tauri::command]
 async fn media_probe(s: tauri::State<'_, AppState>, id: usize, index: usize) -> Cmd<Value> {
@@ -435,7 +435,7 @@ fn main() {
             app.manage(AppState {
                 core: core.clone(),
                 inputs: std::sync::Mutex::new(inbox),
-                power: tokio::sync::Mutex::new(None),
+                power: tokio::sync::Mutex::new(power::PlaybackPower::default()),
             });
             let handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
@@ -486,6 +486,11 @@ fn main() {
                 let c = app.state::<AppState>().core.clone();
                 let _ = native::close();
                 tauri::async_runtime::spawn(async move {
+                    // Release before transfer shutdown, which can take time.
+                    // Mark closed under the same lock used by stream_file.
+                    if let Err(error) = h.state::<AppState>().power.lock().await.shutdown().await {
+                        eprintln!("Unable to release playback sleep prevention: {error}");
+                    }
                     c.media.revoke_all().await;
                     let _ = c.restore_playback_transfers().await;
                     c.api.session().stop().await;

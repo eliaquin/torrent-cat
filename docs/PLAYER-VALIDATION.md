@@ -19,3 +19,10 @@ Tested on macOS with an isolated offline profile and generated H.264/AAC video. 
 - Built-in playback works with an MP4 playback copy and the same fullscreen layout.
 
 Test fixtures and profiles are local, ignored files and are not included in the repository.
+
+## Sleep prevention — 2026-10-16
+
+- Updated from `639da33`; `npm run check`, 19 Rust tests and 16 player tests pass (public-network test skipped).
+- Three Rust regression tests check actual macOS assertions: release/reopen, shutdown rejecting late playback, and owner termination without cleanup.
+- The release app was tested with an isolated offline profile. `pmset -g assertions` confirmed sleep prevention during playback and its removal after returning to the library, quitting with Cmd-Q, closing the window, and forcibly terminating the app with SIGKILL.
+- `caffeinate` now watches the app PID; normal player/app closure also explicitly terminates and reaps it.

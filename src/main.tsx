@@ -87,11 +87,12 @@ function App() {
       for (const p of Array.isArray(paths) ? paths : [paths]) await add(p);
   };
   const back = async () => {
+    // Unmount first to cancel pending player setup before stopping the stream.
+    setPlaying(null);
+    setPage("home");
     await getCurrentWindow().setFullscreen(false).catch(report);
     await invoke("native_close").catch(() => {});
     await invoke("stop_stream").catch(report);
-    setPlaying(null);
-    setPage("home");
     postersRequested.current.clear();
     setPosters({});
   };

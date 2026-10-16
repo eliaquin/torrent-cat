@@ -141,6 +141,7 @@ export function Player({
     void (async () => {
       try {
         await invoke("native_close");
+        if (gen !== generation.current) return;
         const next = await invoke<string>("stream_file", {
           id: playing.id,
           index: playing.index,
