@@ -3,6 +3,7 @@
 Alcance: hallazgos F1–F15 de [la auditoría](BEP-AUDIT-2026-10-16.md).
 Cada hallazgo sigue implementación → self-review → correcciones → pruebas → merge.
 Las referencias de líneas de la auditoría describen el commit base, no el código posterior.
+Las secciones F1–F15 conservan la evidencia de cada integración; C1–C6 documentan los ajustes posteriores.
 
 | Hallazgo | Estado | Evidencia |
 | --- | --- | --- |
@@ -219,3 +220,25 @@ Cada nuevo `started` toma el estado de finalización actual, también al volver 
 La admisión llena devuelve “no admitida” en lugar de un error que cierre al peer. En el protocolo clásico esas solicitudes pueden reintentarse; no se promete respuesta inmediata bajo saturación ni se encolan fuera del presupuesto. Cancel/NotInterested liberan inmediatamente las plazas por peer. Los trabajos antiguos conservan su permiso global hasta salir de la cola/writer, por lo que un flood de cancelar/repetir no puede hacer crecer memoria sin límite. El guard conserva la comprobación de identidad para no retirar una solicitud nueva al soltar una antigua.
 
 Self-review: se comprobó la separación entre plazas lógicas por peer y trabajos retenidos globalmente, incluyendo escritura parcial ya iniciada. La prueba TCP conecta 40 peers, ofrece 32 solicitudes por peer con subida limitada y luego solicita metadata por cada conexión: las 40 responden. También cancela/reemplaza 32 solicitudes en una conexión. La regresión unitaria conserva los trabajos cancelados al admitir los nuevos y verifica ambos presupuestos. Pasan 50 pruebas del motor (3 ignoradas, 5 E2E excluidas), la prueba de 40 peers y Clippy.
+
+
+### C6: alta fallida deja archivos que bloquean el reintento — confirmado y corregido
+
+Se guarda primero una entrada pausada y después se crean los archivos. Si falla ese guardado, no se crean payloads y el reintento sin reutilización funciona. Tras abrir correctamente el almacenamiento se guarda la intención final antes de arrancar. Un error posterior conserva/compensa la pausa. Si falla la creación, un alta nueva se retira duraderamente antes de retirarla de memoria; las restauradas o una retirada fallida conservan el error visible en pausa.
+
+Self-review: mover el guardado reveló una frontera de recuperación adicional. Se persiste `allow_overwrite=false` hasta completar la apertura de archivos, salvo que el usuario hubiera autorizado reutilización. Después se permite recuperar los archivos propios. Los perfiles anteriores conservan su comportamiento mediante default true, y JSON/PostgreSQL no degradan permisos ya concedidos. Restauración y reparación respetan ese campo; un intento de Resume fallido conserva pausa. Esto evita que una caída entre guardado y creación convierta un rechazo de archivos existentes en permiso implícito al reiniciar.
+
+La segunda lectura de Claude detectó tres rutas adicionales dentro de C6: borrar datos de una entrada cuya creación había fallado, archivos vacíos propios que bloqueaban otro intento y permisos de reutilización que solo se actualizaban al reiniciar. Se corrigieron antes de integrar: se rechaza borrar datos sin autorización de reutilización o inicialización completada; en Unix se limpian las creaciones parciales vacías verificando identidad; y un permiso en memoria sobrevive a errores posteriores. También se conserva la barrera de borrado pendiente cuando falla la restauración. La limpieza no promete atomicidad frente a un actor con acceso directo que cambie nombres entre comprobación y unlink. Una caída tras crear archivos pero antes de publicar su permiso sigue fallando cerrada y puede requerir recuperación manual.
+
+Regresiones: fallo real de publicación del JSON antes del payload, reintento estricto, snapshot interrumpido con archivo ajeno, reinicio/Resume/borrado sin modificarlo, colisión multifichero seguida de reintento, recuperación de archivos propios tras error y barrera de borrado pendiente tras restauración fallida. Pasan seis pruebas de ciclo de vida, siete de confinamiento y la regresión del motor; también compila PostgreSQL, sin servidor real.
+
+
+La tercera lectura de Claude, sobre código congelado (19 turnos, solo lectura), confirmó esas correcciones y encontró una combinación adicional: intención de borrar datos persistida sin el permiso de reutilización que ya existía en memoria. JSON y PostgreSQL ahora guardan ambos de forma atómica, después de la comprobación de autorización de `Session::delete`. La regresión JSON parte de permiso falso, comprueba que retirar sin datos no lo concede, autoriza el borrado con datos y verifica ambos campos al reabrir el perfil. Ese ajuste final tuvo self-review y pruebas; no se presenta como una nueva aprobación de Claude.
+
+## Cierre de la implementación
+
+Los quince hallazgos originales y los seis casos de la revisión independiente tienen correcciones y regresiones. C4 se integró en `7c494e8`, C1 en `e819cff`, C2 en `aaaab26`, C5 en `b2b55b3` y C3 en `d58c891`; C6 cierra esta serie. No se contactó a TD ni se usaron credenciales de trackers privados.
+
+Validación final: **181 pruebas pasan** (64 aplicación/integración, 51 motor, 21 bencode, 24 protocolo y 21 tracker). Se mantienen 5 ignoradas y 5 E2E excluidas. Tras el último ajuste de persistencia se repitieron motor, ciclo de vida y confinamiento; Clippy con `-D warnings` y la compilación PostgreSQL también pasan. La compilación TypeScript/Vite ya pasó sobre `d0a2899`; no hubo cambios de frontend posteriores. No se ejecutó un servidor PostgreSQL, Miri, una prueba física de pérdida de energía ni un swarm de clientes independientes.
+
+La revisión externa aportó casos que el self-review inicial no detectó. No sustituye las pruebas ni certifica cumplimiento completo: el trabajo de CI, fuzzing e interoperabilidad listado arriba sigue siendo el siguiente plan de calidad.

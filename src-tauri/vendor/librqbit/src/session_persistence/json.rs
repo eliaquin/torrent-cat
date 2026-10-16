@@ -150,6 +150,7 @@ impl JsonSessionPersistenceStore {
             torrent_bytes: Default::default(),
             only_files: torrent.only_files().clone(),
             is_paused: torrent.is_paused(),
+            allow_overwrite: super::may_reuse_files_on_restore(torrent),
             pending_delete: None,
             name: torrent.name(),
             metadata_error: None,
@@ -175,6 +176,7 @@ impl JsonSessionPersistenceStore {
         self.mutate(move |db| {
             let mut st = st;
             st.pending_delete = db.torrents.get(&id).and_then(|old| old.pending_delete);
+            st.allow_overwrite |= db.torrents.get(&id).is_some_and(|old| old.allow_overwrite);
             if st.pending_delete.is_some() {
                 st.is_paused = true;
             }
@@ -227,6 +229,9 @@ impl SessionPersistenceStore for JsonSessionPersistenceStore {
             let Some(torrent) = db.torrents.get_mut(&id) else {
                 return Ok(());
             };
+            // Session checks file ownership before authorizing delete_files.
+            // Preserve that authorization atomically with removal intent.
+            torrent.allow_overwrite |= delete_files;
             torrent.is_paused = true;
             torrent.pending_delete = Some(torrent.pending_delete.unwrap_or(false) || delete_files);
             Ok(())
@@ -334,6 +339,7 @@ mod tests {
             trackers: Default::default(),
             output_folder: root.path().join("data"),
             only_files: None,
+            allow_overwrite: false,
             is_paused: false,
             pending_delete: None,
             name: None,
@@ -369,6 +375,8 @@ mod tests {
         }));
         assert!(!store.db_content.read().await.torrents[&0].is_paused);
         assert_eq!(std::fs::read(&store.db_filename).unwrap(), original);
+        store.mark_delete_pending(0, false).await.unwrap();
+        assert!(!store.db_content.read().await.torrents[&0].allow_overwrite);
         store.mark_delete_pending(0, true).await.unwrap();
         store.mark_delete_pending(0, false).await.unwrap();
         assert_eq!(
@@ -380,6 +388,7 @@ mod tests {
                 .await
                 .unwrap();
         assert!(reloaded.db_content.read().await.torrents[&0].is_paused);
+        assert!(reloaded.db_content.read().await.torrents[&0].allow_overwrite);
         assert_eq!(
             reloaded.db_content.read().await.torrents[&0].pending_delete,
             Some(true)

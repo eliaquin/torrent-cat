@@ -26,7 +26,10 @@ TorrentCat modifications:
 - Persist pause/removal intent before tracker cleanup, retain failed removals for
   retry and restart, and atomically sync JSON/metainfo plus unlink directories.
   Serialize operations per torrent, deduplicate concurrent magnet resolution and
-  preserve monotonic persisted IDs. Join owned tasks and bound total final announces.
+  preserve monotonic persisted IDs. Persist new additions before creating payload;
+  retain file-reuse permission across interrupted provisioning and pending deletion,
+  reject unowned-data deletion, and roll back partial strict creation on Unix. Join owned tasks
+  and bound total final announces.
 - Cancel initialization waits/checks on pause and deletion, retaining the latest
   discovery intent and releasing ownership on task cancellation.
 - Reject out-of-range metadata requests, validate incremental metadata negotiation

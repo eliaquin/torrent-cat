@@ -192,6 +192,7 @@ pub struct ManagedTorrentShared {
     pub(crate) lifecycle: Arc<tokio::sync::Mutex<()>>,
     pub(crate) deleting: std::sync::atomic::AtomicBool,
     pub(crate) delete_files: std::sync::atomic::AtomicBool,
+    pub(crate) files_initialized: std::sync::atomic::AtomicBool,
     pub peer_id: Id20,
     pub span: tracing::Span,
     pub(crate) options: ManagedTorrentOptions,
@@ -206,6 +207,9 @@ pub struct ManagedTorrentShared {
 }
 
 impl ManagedTorrentShared {
+    pub(crate) fn can_reuse_files(&self) -> bool {
+        self.options.allow_overwrite || self.files_initialized.load(Ordering::Acquire)
+    }
     pub(crate) fn client_name_and_version(&self) -> &str {
         &self.client_name_and_version
     }

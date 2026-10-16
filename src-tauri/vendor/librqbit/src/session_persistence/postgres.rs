@@ -26,6 +26,7 @@ struct TorrentsTableRecord {
     output_folder: String,
     only_files: Option<Vec<i32>>,
     is_paused: bool,
+    allow_overwrite: bool,
     pending_delete: Option<bool>,
 }
 
@@ -42,6 +43,7 @@ impl TorrentsTableRecord {
                     .only_files
                     .map(|v| v.into_iter().map(|v| v as usize).collect()),
                 is_paused: self.is_paused,
+                allow_overwrite: self.allow_overwrite,
                 pending_delete: self.pending_delete,
                 name: None,
                 metadata_error: None,
@@ -85,6 +87,9 @@ impl PostgresSessionStorage {
 
         exec!("ALTER TABLE torrents ADD COLUMN IF NOT EXISTS have_bitfield BYTEA");
         exec!("ALTER TABLE torrents ADD COLUMN IF NOT EXISTS pending_delete BOOLEAN");
+        exec!(
+            "ALTER TABLE torrents ADD COLUMN IF NOT EXISTS allow_overwrite BOOLEAN NOT NULL DEFAULT TRUE"
+        );
 
         Ok(Self { pool })
     }
@@ -107,11 +112,12 @@ impl SessionPersistenceStore for PostgresSessionStorage {
             .as_ref()
             .map(|i| i.torrent_bytes.clone())
             .unwrap_or_default();
-        let q = "INSERT INTO torrents (id, info_hash, torrent_bytes, trackers, output_folder, only_files, is_paused)
-        VALUES($1, $2, $3, $4, $5, $6, $7)
+        let q = "INSERT INTO torrents (id, info_hash, torrent_bytes, trackers, output_folder, only_files, is_paused, allow_overwrite)
+        VALUES($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT(id) DO UPDATE SET torrent_bytes = EXCLUDED.torrent_bytes,
         trackers = EXCLUDED.trackers, output_folder = EXCLUDED.output_folder,
         only_files = EXCLUDED.only_files,
+        allow_overwrite = torrents.allow_overwrite OR EXCLUDED.allow_overwrite,
         is_paused = CASE WHEN torrents.pending_delete IS NOT NULL THEN TRUE ELSE EXCLUDED.is_paused END";
         sqlx::query(q)
             .bind::<i32>(id.try_into()?)
@@ -140,6 +146,7 @@ impl SessionPersistenceStore for PostgresSessionStorage {
                     .collect::<Vec<i32>>()
             }))
             .bind(torrent.is_paused())
+            .bind(super::may_reuse_files_on_restore(torrent))
             .execute(&self.pool)
             .await
             .context("error executing INSERT INTO torrents")?;
@@ -147,7 +154,7 @@ impl SessionPersistenceStore for PostgresSessionStorage {
     }
 
     async fn mark_delete_pending(&self, id: TorrentId, delete_files: bool) -> anyhow::Result<()> {
-        sqlx::query("UPDATE torrents SET pending_delete = COALESCE(pending_delete, FALSE) OR $1, is_paused = TRUE WHERE id = $2")
+        sqlx::query("UPDATE torrents SET pending_delete = COALESCE(pending_delete, FALSE) OR $1, allow_overwrite = allow_overwrite OR $1, is_paused = TRUE WHERE id = $2")
             .bind(delete_files).bind::<i32>(id.try_into()?).execute(&self.pool).await?;
         Ok(())
     }
@@ -177,7 +184,7 @@ impl SessionPersistenceStore for PostgresSessionStorage {
         id: TorrentId,
         torrent: &ManagedTorrentHandle,
     ) -> anyhow::Result<()> {
-        sqlx::query("UPDATE torrents SET only_files = $1, is_paused = $2 WHERE id = $3")
+        sqlx::query("UPDATE torrents SET only_files = $1, is_paused = $2, allow_overwrite = allow_overwrite OR $4 WHERE id = $3")
             .bind(torrent.only_files().map(|v| {
                 v.into_iter()
                     .filter_map(|f| f.try_into().ok())
@@ -185,6 +192,7 @@ impl SessionPersistenceStore for PostgresSessionStorage {
             }))
             .bind(torrent.is_paused())
             .bind::<i32>(id.try_into()?)
+            .bind(super::may_reuse_files_on_restore(torrent))
             .execute(&self.pool)
             .await
             .context("error executing UPDATE torrents")?;

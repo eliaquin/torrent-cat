@@ -29,12 +29,24 @@ pub struct SerializedTorrent {
     pub(crate) output_folder: PathBuf,
     pub(crate) only_files: Option<Vec<usize>>,
     pub(crate) is_paused: bool,
+    #[serde(default = "default_allow_overwrite")]
+    pub(crate) allow_overwrite: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pending_delete: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) name: Option<String>,
     #[serde(skip)]
     pub(crate) metadata_error: Option<String>,
+}
+
+fn default_allow_overwrite() -> bool {
+    true
+}
+
+// File creation is not committed until storage initialized successfully. Legacy
+// records already owned their files; incomplete new additions retain create_new.
+pub(crate) fn may_reuse_files_on_restore(torrent: &ManagedTorrentHandle) -> bool {
+    torrent.shared().can_reuse_files()
 }
 
 impl SerializedTorrent {
@@ -66,7 +78,7 @@ impl SerializedTorrent {
                     .to_owned(),
             ),
             only_files: self.only_files,
-            overwrite: true,
+            overwrite: self.allow_overwrite,
             ..Default::default()
         };
 

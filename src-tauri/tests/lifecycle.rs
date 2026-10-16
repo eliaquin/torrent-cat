@@ -209,3 +209,127 @@ async fn stop_joins_owned_background_work_before_returning() {
         .expect("stop returned before dropping background work");
     s.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_add_persistence_creates_no_payload_and_retry_without_reuse_succeeds() {
+    let root = tempfile::tempdir().unwrap();
+    let s = open(root.path()).await;
+    let _existing = add(&s, root.path()).await;
+    let source = root.path().join("fresh.bin");
+    std::fs::write(&source, vec![9; 16384]).unwrap();
+    let mut bytes = Vec::new();
+    lava_torrent::torrent::v1::TorrentBuilder::new(&source, 16384)
+        .set_num_threads(1)
+        .build()
+        .unwrap()
+        .write_into(&mut bytes)
+        .unwrap();
+    let opts = || {
+        Some(AddTorrentOptions {
+            paused: true,
+            overwrite: false,
+            ..Default::default()
+        })
+    };
+    block_database(root.path());
+    assert!(
+        s.add_torrent(AddTorrent::TorrentFileBytes(bytes.clone().into()), opts())
+            .await
+            .is_err()
+    );
+    assert!(
+        !root.path().join("data/fresh.bin").exists(),
+        "failed store must precede payload creation"
+    );
+    assert_eq!(s.with_torrents(|t| t.count()), 1);
+    unblock_database(root.path());
+    let h = s
+        .add_torrent(AddTorrent::TorrentFileBytes(bytes.into()), opts())
+        .await
+        .unwrap()
+        .into_handle()
+        .unwrap();
+    h.wait_until_initialized().await.unwrap();
+    assert!(h.is_paused());
+    assert!(root.path().join("data/fresh.bin").exists());
+    assert_eq!(
+        std::fs::read(root.path().join("data/payload.bin")).unwrap(),
+        vec![7; 16384]
+    );
+    s.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn interrupted_strict_add_never_gains_permission_to_reuse_files_on_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let s = open(root.path()).await;
+    let h = add(&s, root.path()).await;
+    s.stop().await;
+    // Crash-image fixture: record published but payload provisioning was not
+    // committed. An existing file must not be adopted implicitly on restoration.
+    let mut snapshot = db(root.path());
+    snapshot["torrents"][h.id().to_string()]["allow_overwrite"] = false.into();
+    snapshot["torrents"][h.id().to_string()]["is_paused"] = true.into();
+    std::fs::write(
+        root.path().join("profile/session.json"),
+        serde_json::to_vec(&snapshot).unwrap(),
+    )
+    .unwrap();
+    let existing = root.path().join("data/payload.bin");
+    std::fs::write(&existing, b"user-owned-existing-file").unwrap();
+    let restarted = open(root.path()).await;
+    let retained = restarted.get(h.id().into()).unwrap();
+    assert!(retained.is_paused());
+    assert!(retained.stats().error.is_some());
+    assert_eq!(
+        std::fs::read(&existing).unwrap(),
+        b"user-owned-existing-file"
+    );
+    assert!(restarted.unpause(&retained).await.is_err());
+    assert!(retained.is_paused());
+    assert_eq!(
+        std::fs::read(&existing).unwrap(),
+        b"user-owned-existing-file"
+    );
+    assert!(restarted.delete(h.id().into(), true).await.is_err());
+    assert_eq!(
+        std::fs::read(&existing).unwrap(),
+        b"user-owned-existing-file"
+    );
+    assert!(restarted.get(h.id().into()).is_some());
+    restarted.delete(h.id().into(), false).await.unwrap();
+    restarted.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_storage_restore_retains_pending_delete_guard() {
+    let root = tempfile::tempdir().unwrap();
+    let s = open(root.path()).await;
+    let h = add(&s, root.path()).await;
+    s.stop().await;
+    let mut snapshot = db(root.path());
+    let record = &mut snapshot["torrents"][h.id().to_string()];
+    record["allow_overwrite"] = false.into();
+    record["pending_delete"] = true.into();
+    record["is_paused"] = true.into();
+    std::fs::write(
+        root.path().join("profile/session.json"),
+        serde_json::to_vec(&snapshot).unwrap(),
+    )
+    .unwrap();
+    let restarted = open(root.path()).await;
+    let retained = restarted.get(h.id().into()).unwrap();
+    assert!(retained.is_paused());
+    let error = restarted.unpause(&retained).await.unwrap_err();
+    assert!(error.to_string().contains("removal is pending"), "{error:#}");
+    assert_eq!(
+        db(root.path())["torrents"][h.id().to_string()]["pending_delete"],
+        true
+    );
+    assert!(restarted.delete(h.id().into(), true).await.is_err());
+    assert_eq!(
+        std::fs::read(root.path().join("data/payload.bin")).unwrap(),
+        vec![7; 16384]
+    );
+    restarted.stop().await;
+}
