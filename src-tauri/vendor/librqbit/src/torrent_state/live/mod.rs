@@ -1362,10 +1362,12 @@ impl PeerConnectionHandler for &'_ PeerHandler {
                     self.state.shared.id, self.addr
                 ),
                 self.cancel_token.clone(),
-                self.state.clone().task_send_pex_to_peer(
-                    self.addr,
-                    self.tx.clone(),
-                    self.pex.clone(),
+                self.state.shared.transfer_tasks.track_future(
+                    self.state.clone().task_send_pex_to_peer(
+                        self.addr,
+                        self.tx.clone(),
+                        self.pex.clone(),
+                    ),
                 ),
             );
         }

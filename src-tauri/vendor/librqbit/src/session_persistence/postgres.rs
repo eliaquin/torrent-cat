@@ -26,6 +26,7 @@ struct TorrentsTableRecord {
     output_folder: String,
     only_files: Option<Vec<i32>>,
     is_paused: bool,
+    pending_delete: Option<bool>,
 }
 
 impl TorrentsTableRecord {
@@ -41,6 +42,7 @@ impl TorrentsTableRecord {
                     .only_files
                     .map(|v| v.into_iter().map(|v| v as usize).collect()),
                 is_paused: self.is_paused,
+                pending_delete: self.pending_delete,
             },
         ))
     }
@@ -80,6 +82,7 @@ impl PostgresSessionStorage {
         );
 
         exec!("ALTER TABLE torrents ADD COLUMN IF NOT EXISTS have_bitfield BYTEA");
+        exec!("ALTER TABLE torrents ADD COLUMN IF NOT EXISTS pending_delete BOOLEAN");
 
         Ok(Self { pool })
     }
@@ -138,6 +141,12 @@ impl SessionPersistenceStore for PostgresSessionStorage {
         Ok(())
     }
 
+    async fn mark_delete_pending(&self, id: TorrentId, delete_files: bool) -> anyhow::Result<()> {
+        sqlx::query("UPDATE torrents SET pending_delete = COALESCE(pending_delete, FALSE) OR $1, is_paused = TRUE WHERE id = $2")
+            .bind(delete_files).bind::<i32>(id.try_into()?).execute(&self.pool).await?;
+        Ok(())
+    }
+
     async fn delete(&self, id: TorrentId) -> anyhow::Result<()> {
         sqlx::query("DELETE FROM torrents WHERE id = $1")
             .bind::<i32>(id.try_into()?)
@@ -148,7 +157,7 @@ impl SessionPersistenceStore for PostgresSessionStorage {
     }
 
     async fn get(&self, id: TorrentId) -> anyhow::Result<SerializedTorrent> {
-        let row = sqlx::query_as::<_, TorrentsTableRecord>("SELECT * FROM torrents WHERE id = ?")
+        let row = sqlx::query_as::<_, TorrentsTableRecord>("SELECT * FROM torrents WHERE id = $1")
             .bind::<i32>(id.try_into()?)
             .fetch_one(&self.pool)
             .await

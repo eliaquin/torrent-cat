@@ -71,6 +71,32 @@ fn open_root(path: &Path) -> anyhow::Result<Dir> {
 }
 
 impl FilesystemStorage {
+    fn remove_entry(&self, path: &Path, directory: bool) -> anyhow::Result<()> {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let parent = self.root.open_dir(parent)?;
+        let name = path.file_name().context("entry has no filename")?;
+        let result = if directory {
+            parent.remove_dir(name)
+        } else {
+            parent.remove_file(name)
+        };
+        match result {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if directory && error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        }
+        // Persist the unlink before the session can forget its removal intent.
+        #[cfg(unix)]
+        parent.into_std_file().sync_all()?;
+        Ok(())
+    }
+
     #[allow(dead_code)]
     pub(crate) fn take_fs(&self) -> anyhow::Result<Self> {
         Ok(Self {
@@ -125,7 +151,7 @@ impl TorrentStorage for FilesystemStorage {
     }
 
     fn remove_file(&self, _file_id: usize, filename: &Path) -> anyhow::Result<()> {
-        Ok(self.root.remove_file(filename)?)
+        self.remove_entry(filename, false)
     }
 
     fn ensure_file_length(&self, file_id: usize, len: u64) -> anyhow::Result<()> {
@@ -153,11 +179,7 @@ impl TorrentStorage for FilesystemStorage {
             // different directory. Torrent-owned descendants are removed below.
             return Ok(());
         }
-        match self.root.remove_dir(path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("error removing {path:?}")),
-        }
+        self.remove_entry(path, true)
     }
 
     fn init(

@@ -226,7 +226,10 @@ impl TrackerComms {
                     if let Some(old) = active.as_ref()
                         && let Some(state) = states.get_mut(old)
                     {
-                        self.finish_tracker(old, state).await;
+                        tokio::select! {
+                            _ = self.cancel.cancelled() => break 'monitor,
+                            _ = self.finish_tracker(old, state) => {},
+                        }
                     }
                 }
                 active = Some(url.clone());
@@ -290,8 +293,17 @@ impl TrackerComms {
         }
         let _ = timeout(Duration::from_secs(2), self.stats.wait_for_transfers()).await;
         // Private previous trackers were already stopped before crossing the barrier.
-        for (url, mut state) in states {
-            self.finish_tracker(&url, &mut state).await;
+        // Bound the whole finalization, not each URL multiplied by an arbitrary
+        // tracker list. No worker may outlive the session's shutdown allowance.
+        if timeout(Duration::from_secs(6), async {
+            for (url, mut state) in states {
+                self.finish_tracker(&url, &mut state).await;
+            }
+        })
+        .await
+        .is_err()
+        {
+            tracing::warn!("final tracker announces exceeded shutdown budget");
         }
     }
     async fn request(

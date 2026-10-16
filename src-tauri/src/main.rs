@@ -504,7 +504,7 @@ fn main() {
                     if let Err(error) = h.state::<AppState>().power.lock().await.shutdown().await {
                         eprintln!("Unable to release playback sleep prevention: {error}");
                     }
-                    c.media.revoke_all().await;
+                    c.media.shutdown().await;
                     let _ = c.restore_playback_transfers().await;
                     c.api.session().stop().await;
                     h.exit(0);

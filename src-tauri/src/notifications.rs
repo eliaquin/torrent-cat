@@ -23,50 +23,55 @@ impl Completions {
 }
 
 pub fn start(core: Arc<Core>, app: tauri::AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        let mut completions = Completions::default();
-        let mut timer = tokio::time::interval(Duration::from_secs(1));
-        loop {
-            timer.tick().await;
-            let list = core
-                .api
-                .api_torrent_list_ext(librqbit::api::ApiTorrentListOpts { with_stats: true });
-            let entries = list
-                .torrents
-                .into_iter()
-                .filter_map(|t| {
-                    let stats = t.stats?;
-                    if matches!(
-                        stats.state,
-                        librqbit::TorrentStatsState::Initializing { .. }
-                    ) {
-                        return None;
+    let session = core.api.session().clone();
+    session.spawn(
+        tracing::Span::current(),
+        "completion-notifications",
+        async move {
+            let mut completions = Completions::default();
+            let mut timer = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                timer.tick().await;
+                let list = core
+                    .api
+                    .api_torrent_list_ext(librqbit::api::ApiTorrentListOpts { with_stats: true });
+                let entries = list
+                    .torrents
+                    .into_iter()
+                    .filter_map(|t| {
+                        let stats = t.stats?;
+                        if matches!(
+                            stats.state,
+                            librqbit::TorrentStatsState::Initializing { .. }
+                        ) {
+                            return None;
+                        }
+                        Some((
+                            t.info_hash,
+                            t.name.unwrap_or_else(|| "Torrent".into()),
+                            stats.finished,
+                        ))
+                    })
+                    .collect();
+                for name in completions.update(entries) {
+                    let _ = app.emit("download-complete", &name);
+                    if core.profile.lock().await.prefs.completion_notifications
+                        && matches!(
+                            app.notification().permission_state(),
+                            Ok(tauri_plugin_notification::PermissionState::Granted)
+                        )
+                    {
+                        let _ = app
+                            .notification()
+                            .builder()
+                            .title("Download complete")
+                            .body(name)
+                            .show();
                     }
-                    Some((
-                        t.info_hash,
-                        t.name.unwrap_or_else(|| "Torrent".into()),
-                        stats.finished,
-                    ))
-                })
-                .collect();
-            for name in completions.update(entries) {
-                let _ = app.emit("download-complete", &name);
-                if core.profile.lock().await.prefs.completion_notifications
-                    && matches!(
-                        app.notification().permission_state(),
-                        Ok(tauri_plugin_notification::PermissionState::Granted)
-                    )
-                {
-                    let _ = app
-                        .notification()
-                        .builder()
-                        .title("Download complete")
-                        .body(name)
-                        .show();
                 }
             }
-        }
-    });
+        },
+    );
 }
 
 #[cfg(test)]

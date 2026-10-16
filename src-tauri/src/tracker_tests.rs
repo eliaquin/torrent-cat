@@ -919,3 +919,228 @@ async fn extreme_http_interval_recovers_without_panic_or_immediate_retry() {
     client.stop().await;
     assert_eq!(tracker.records().last().unwrap().event(), "stopped");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_tracker_does_not_hold_session_lock_and_local_intent_survives_restart() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/announce", listener.local_addr().unwrap());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let mut buf = [0; 4096];
+                let n = stream.read(&mut buf).await.unwrap();
+                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+                // Holding the socket open simulates a tracker that never replies.
+                let _ = stream.read(&mut buf).await;
+            });
+        }
+    });
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let bytes = fixture(&source, vec![url]);
+    let profile = root.path().join("profile");
+    let client = Session::new_with_opts(
+        source.clone(),
+        SessionOptions {
+            dht: None,
+            disable_local_service_discovery: true,
+            persistence: Some(librqbit::SessionPersistenceConfig::Json {
+                folder: Some(profile.clone()),
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let h = add(&client, &bytes, &source, None, vec![], vec![]).await;
+    timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let pause = {
+        let c = client.clone();
+        let h = h.clone();
+        tokio::spawn(async move { c.pause(&h).await })
+    };
+    assert!(
+        timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .contains("event=stopped")
+    );
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let snapshot: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(profile.join("session.json")).unwrap())
+                    .unwrap();
+            if snapshot["torrents"][h.id().to_string()]["is_paused"] == true {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("pause intent must be persisted while the tracker is still waiting");
+    let second = root.path().join("second");
+    let bytes2 = fixture(&second, vec!["http://127.0.0.1:1/unused".into()]);
+    let h2 = timeout(
+        Duration::from_secs(1),
+        client.add_torrent(
+            AddTorrent::TorrentFileBytes(bytes2.into()),
+            Some(AddTorrentOptions {
+                output_folder: Some(second.to_string_lossy().into()),
+                overwrite: true,
+                paused: true,
+                ..Default::default()
+            }),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .into_handle()
+    .unwrap();
+    assert!(
+        !pause.is_finished(),
+        "independent add must finish before slow tracker cleanup"
+    );
+    pause.await.unwrap().unwrap();
+    client.unpause(&h).await.unwrap();
+    assert!(
+        timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .contains("event=started")
+    );
+    timeout(Duration::from_secs(5), client.delete(h.id().into(), true))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!source.join("a.bin").exists());
+    client.stop().await;
+    let restored = Session::new_with_opts(
+        source,
+        SessionOptions {
+            dht: None,
+            disable_trackers: true,
+            disable_local_service_discovery: true,
+            persistence: Some(librqbit::SessionPersistenceConfig::Json {
+                folder: Some(profile),
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(restored.get(h.id().into()).is_none());
+    assert!(restored.get(h2.id().into()).unwrap().is_paused());
+    restored.stop().await;
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_same_magnet_has_one_discovery_and_one_managed_torrent() {
+    let tracker = Tracker::http(60, 60).await;
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("seed");
+    std::fs::create_dir_all(&source).unwrap();
+    let file = source.join("payload.bin");
+    std::fs::write(&file, vec![7; 16384]).unwrap();
+    let mut bytes = Vec::new();
+    lava_torrent::torrent::v1::TorrentBuilder::new(&file, 16384)
+        .set_num_threads(1)
+        .set_announce(Some(tracker.url.clone()))
+        .build()
+        .unwrap()
+        .write_into(&mut bytes)
+        .unwrap();
+    let seeder = session(&source, None).await;
+    let seed = add(&seeder, &bytes, &source, None, vec![], vec![]).await;
+    tracker.state.lock().unwrap().peers = vec![seeder.listen_addr().unwrap()];
+    let client = session(&root.path().join("download"), None).await;
+    let magnet = format!(
+        "magnet:?xt=urn:btih:{}&tr={}",
+        seed.info_hash().as_string(),
+        url::form_urlencoded::byte_serialize(tracker.url.as_bytes()).collect::<String>()
+    );
+    let (a, b) = timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            client.add_torrent(AddTorrent::from_url(&magnet), None),
+            client.add_torrent(AddTorrent::from_url(&magnet), None)
+        )
+    })
+    .await
+    .unwrap();
+    let a = a.unwrap().into_handle().unwrap();
+    let b = b.unwrap().into_handle().unwrap();
+    assert!(Arc::ptr_eq(&a, &b));
+    assert_eq!(client.with_torrents(|t| t.count()), 1);
+    tracker
+        .wait(|r| r.iter().filter(|r| r.event() == "started").count() >= 3)
+        .await;
+    assert_eq!(
+        tracker
+            .records()
+            .iter()
+            .filter(|r| r.event() == "started")
+            .count(),
+        3,
+        "seeder + one discovery + managed download"
+    );
+    client.stop().await;
+    seeder.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn final_announces_have_a_total_budget_across_multiple_failed_trackers() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let server = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let tx = tx.clone();
+            connections.spawn(async move {
+                let mut buf=[0;4096];let n=stream.read(&mut buf).await.unwrap();
+                let text=String::from_utf8_lossy(&buf[..n]);
+                if text.contains("event=started") {
+                    stream.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                    let _=tx.send(());
+                } else { let _=stream.read(&mut buf).await; }
+            });
+        }
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("payload.bin");
+    std::fs::write(&file, vec![4; 16384]).unwrap();
+    let mut bytes = Vec::new();
+    lava_torrent::torrent::v1::TorrentBuilder::new(&file, 16384)
+        .set_num_threads(1)
+        .set_announce_list(vec![
+            (0..3)
+                .map(|n| format!("http://{address}/announce/{n}"))
+                .collect(),
+        ])
+        .build()
+        .unwrap()
+        .write_into(&mut bytes)
+        .unwrap();
+    let s = session(temp.path(), None).await;
+    let _h = add(&s, &bytes, temp.path(), None, vec![], vec![]).await;
+    for _ in 0..3 {
+        timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    timeout(Duration::from_secs(8), s.stop())
+        .await
+        .expect("shutdown budget must not grow with tracker count");
+    server.abort();
+}

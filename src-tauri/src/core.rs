@@ -301,12 +301,7 @@ impl Core {
         }
         match action {
             "pause" => {
-                if !matches!(
-                    self.api.api_stats_v1(key)?.state,
-                    librqbit::TorrentStatsState::Paused
-                ) {
-                    self.api.api_torrent_action_pause(key).await?;
-                }
+                self.api.api_torrent_action_pause(key).await?;
             }
             "recheck" => {
                 let handle = self.api.session().get(key).context("Unknown torrent")?;
