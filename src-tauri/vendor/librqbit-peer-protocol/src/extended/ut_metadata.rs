@@ -33,6 +33,10 @@ impl<ByteBuf: ByteBufT> UtMetadataData<ByteBuf> {
 }
 
 impl<'a> UtMetadataData<ByteBuf<'a>> {
+    pub fn total_size(&self) -> u32 {
+        self.total_size
+    }
+
     pub fn piece(&self) -> u32 {
         self.piece
     }
