@@ -7,6 +7,8 @@ use std::{
 };
 
 use anyhow::Context;
+use parking_lot::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use size_format::SizeFormatterBinary as SF;
 use tracing::{info, trace, warn};
@@ -15,7 +17,7 @@ use crate::{
     api::TorrentIdOrHash,
     chunk_tracker::{ChunkTracker, compute_selected_pieces},
     file_ops::FileOps,
-    type_aliases::FileStorage,
+    type_aliases::{FileStorage, PeerStream},
 };
 
 use super::{ManagedTorrentShared, TorrentMetadata, paused::TorrentStatePaused};
@@ -27,7 +29,27 @@ pub struct TorrentStateInitializing {
     pub(crate) only_files: Option<Vec<usize>>,
     pub(crate) checked_bytes: AtomicU64,
     pause_requested: AtomicBool,
-    check_running: AtomicBool,
+    check_state: Mutex<CheckState>,
+}
+
+#[derive(Default)]
+struct CheckState {
+    running: bool,
+    cancel: CancellationToken,
+    peers: Option<PeerStream>,
+}
+
+// Reset ownership even if session shutdown drops the initialization future.
+pub(crate) struct CheckGuard {
+    init: Arc<TorrentStateInitializing>,
+    pub(crate) cancel: CancellationToken,
+}
+impl Drop for CheckGuard {
+    fn drop(&mut self) {
+        let mut state = self.init.check_state.lock();
+        state.peers.take();
+        state.running = false;
+    }
 }
 
 impl TorrentStateInitializing {
@@ -44,7 +66,7 @@ impl TorrentStateInitializing {
             files,
             checked_bytes: AtomicU64::new(0),
             pause_requested: AtomicBool::new(false),
-            check_running: AtomicBool::new(false),
+            check_state: Mutex::new(CheckState::default()),
         }
     }
 
@@ -54,25 +76,37 @@ impl TorrentStateInitializing {
     }
 
     pub(crate) fn request_pause(&self) {
-        self.pause_requested.store(true, Ordering::Relaxed);
-    }
-
-    pub(crate) fn clear_pause_request(&self) {
-        self.pause_requested.store(false, Ordering::Relaxed);
+        self.pause_requested.store(true, Ordering::Release);
+        let mut state = self.check_state.lock();
+        state.cancel.cancel();
+        state.peers.take();
     }
 
     pub(crate) fn is_pause_requested(&self) -> bool {
-        self.pause_requested.load(Ordering::Relaxed)
+        self.pause_requested.load(Ordering::Acquire)
     }
 
-    pub(crate) fn try_start_check(&self) -> bool {
-        self.check_running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+    // Called under the managed-state lock, like request_pause. A second start
+    // updates discovery intent without clearing an in-flight cancellation.
+    pub(crate) fn start_check(self: &Arc<Self>, peers: Option<PeerStream>) -> Option<CheckGuard> {
+        let mut state = self.check_state.lock();
+        if peers.is_some() {
+            state.peers = peers;
+        }
+        if state.running {
+            return None;
+        }
+        state.running = true;
+        state.cancel = CancellationToken::new();
+        self.pause_requested.store(false, Ordering::Release);
+        Some(CheckGuard {
+            init: self.clone(),
+            cancel: state.cancel.clone(),
+        })
     }
 
-    pub(crate) fn finish_check(&self) {
-        self.check_running.store(false, Ordering::Release);
+    pub(crate) fn take_peers(&self) -> Option<PeerStream> {
+        self.check_state.lock().peers.take()
     }
 
     pub async fn check(&self) -> anyhow::Result<TorrentStatePaused> {

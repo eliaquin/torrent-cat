@@ -2286,6 +2286,114 @@ impl tracker_comms::TorrentStatsProvider for PeerRxTorrentInfo {
 
 #[cfg(test)]
 mod tests {
+    async fn initialization_fixture() -> (tempfile::TempDir, std::sync::Arc<super::Session>) {
+        let root = tempfile::tempdir().unwrap();
+        let session = super::Session::new_with_opts(
+            root.path().to_owned(),
+            super::SessionOptions {
+                dht: None,
+                disable_trackers: true,
+                disable_local_service_discovery: true,
+                concurrent_init_limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        (root, session)
+    }
+    async fn waiting_torrent(s: &std::sync::Arc<super::Session>) -> super::ManagedTorrentHandle {
+        let mut bytes =
+            b"d4:infod6:lengthi16384e4:name7:payload12:piece lengthi16384e6:pieces20:".to_vec();
+        bytes.extend_from_slice(&[0; 20]);
+        bytes.extend_from_slice(b"ee");
+        s.add_torrent(
+            super::AddTorrent::TorrentFileBytes(bytes.into()),
+            Some(super::AddTorrentOptions {
+                paused: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_handle()
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn initialization_wait_is_cancelled_by_pause_delete_and_stop() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+        for operation in ["pause", "delete", "stop"] {
+            let (_root, s) = initialization_fixture().await;
+            let barrier = s.concurrent_initialize_semaphore.acquire().await.unwrap();
+            let h = waiting_torrent(&s).await;
+            assert!(
+                h.with_state(|state| matches!(state, crate::ManagedTorrentState::Initializing(_)))
+            );
+            match operation {
+                "pause" => timeout(Duration::from_secs(2), s.pause(&h))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                "delete" => timeout(Duration::from_secs(2), s.delete(h.id().into(), true))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                _ => timeout(Duration::from_secs(2), s.stop()).await.unwrap(),
+            }
+            assert!(h.is_paused());
+            assert!(h.live().is_none());
+            assert!(h.shared.transfer_tasks.is_empty());
+            drop(barrier);
+            if operation == "pause" {
+                // The cancelled worker released its running flag. Resume can
+                // create a new check and reach Live, rather than staying stuck.
+                s.unpause(&h).await.unwrap();
+                timeout(Duration::from_secs(2), h.wait_until_initialized())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(h.live().is_some());
+                s.pause(&h).await.unwrap();
+            } else if operation == "delete" {
+                assert!(s.get(h.id().into()).is_none());
+                assert!(!h.shared.options.output_folder.join("payload").exists());
+                assert!(s.unpause(&h).await.is_err());
+            }
+            timeout(Duration::from_secs(2), s.stop()).await.unwrap();
+            assert!(h.live().is_none());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resume_during_initialization_retains_new_peer_stream() {
+        use futures::StreamExt;
+        let (_root, s) = initialization_fixture().await;
+        let barrier = s.concurrent_initialize_semaphore.acquire().await.unwrap();
+        let h = waiting_torrent(&s).await;
+        let polled = std::sync::Arc::new(tokio::sync::Notify::new());
+        let signal = polled.clone();
+        h.start(
+            Some(
+                futures::stream::poll_fn(move |_| {
+                    signal.notify_one();
+                    std::task::Poll::Pending
+                })
+                .boxed(),
+            ),
+            false,
+        )
+        .unwrap();
+        drop(barrier);
+        tokio::time::timeout(std::time::Duration::from_secs(2), polled.notified())
+            .await
+            .unwrap();
+        assert!(h.live().is_some());
+        s.stop().await;
+        assert!(h.shared.transfer_tasks.is_empty());
+    }
+
     use buffers::ByteBuf;
     use itertools::Itertools;
     use librqbit_core::torrent_metainfo::{TorrentMetaV1, torrent_from_bytes};

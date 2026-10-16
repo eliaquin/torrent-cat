@@ -16,8 +16,8 @@ Las referencias de líneas de la auditoría describen el commit base, no el cód
 | F8 — extensiones y PEX | Integrado en `4515126` y publicado | Negociación por TCP y filtrado de payload PEX |
 | F9 — ciclo de vida y persistencia | Integrado en `d4e988e` y publicado | Fallos de disco, reinicio abrupto, tracker silencioso y cierre de conexiones |
 | F10 — contabilidad de escrituras parciales | Integrado en `ead35c1` y publicado | Transporte controlado, corrupción/repetición y anuncios locales |
-| F11 — recuperación de metadata persistida | Implementado, revisado y validado | Entradas visibles, reparación por hash y cero descubrimiento |
-| F12 — pausa y borrado durante inicialización | Pendiente | |
+| F11 — recuperación de metadata persistida | Integrado en `cd72889` y publicado | Entradas visibles, reparación por hash y cero descubrimiento |
+| F12 — pausa y borrado durante inicialización | Implementado, revisado y validado | Barrera de permisos, cancelación y stream de peers |
 | F13 — límites al servir metadata | Pendiente | |
 | F14 — secuencia al recibir metadata | Pendiente | |
 | F15 — buffers para mapas de piezas | Pendiente | |
@@ -138,3 +138,12 @@ La tarjeta ofrece **Repair torrent…** para elegir el `.torrent` original. El b
 Self-review: se eliminó toda resolución implícita, incluida la previsualización de un magnet cuyo hash ya está en recuperación. Se añadió validación del hash para impedir restaurar un `.torrent` intercambiado. Se comprobó el orden pausa durable → metadata → reemplazo del handle bajo locks, y la convivencia con cierre, altas duplicadas y borrado. La reparación mantiene el factory de almacenamiento configurado. El frontend no ofrece borrar datos de una entrada sin metadata, y los errores muestran una acción de reparación sin volcar contenido bencode o URLs del tracker.
 
 Validación: 57 pruebas de aplicación/integración pasan (1 pública ignorada); 41 del motor pasan (3 ignoradas y 5 E2E excluidas). La matriz cubre ocho daños —ausente, vacío, inválido, hash distinto, tamaño excesivo, directorio, symlink y FIFO— junto a otra entrada sana, reinicio y reparación. Se verifican cero contactos al tracker loopback, rechazo de reparación incorrecta, contenido conservado, ID/carpeta/selección estables, falla real al publicar metadata, pausa persistida y convergencia de borrados pendientes. Una prueba de Core comprueba el snapshot que recibe la biblioteca y la reparación con el archivo seleccionado. Compilación TypeScript/Vite, Clippy con `-D warnings` y compilación del backend PostgreSQL opcional pasan; este último no se probó contra un servidor. No se usó TD.
+
+
+## F12: cancelación e intención durante inicialización
+
+La pausa cancela la espera del permiso y los puntos asíncronos del chequeo, y libera inmediatamente el stream de descubrimiento. El trabajo de disco síncrono termina dentro de su tarea antes de liberar su registro. Un guard restablece la propiedad del chequeo incluso si se cancela la sesión; reanudar puede iniciar otro chequeo. La transición exitosa consulta la intención actual de pausa/borrado bajo el lock de estado, incorporada en F9.
+
+Self-review: se detectó además que reanudar una inicialización originalmente pausada perdía el nuevo stream de peers. Ahora el estado de inicialización conserva la actualización y la entrega al pasar a Live. Un segundo start no borra la cancelación del chequeo en curso. Se revisó el orden de locks, la liberación del guard antes del registro de tareas y la ausencia de trabajo de disco separado que pueda sobrevivir al borrado.
+
+Validación: barreras deterministas retienen todos los permisos de inicialización; pausa, borrado y cierre terminan sin liberarlas y sin tareas de transferencia restantes. Tras liberar, el torrent borrado no reaparece y el pausado puede reanudar. Otra barrera comprueba que el stream actualizado se consume al pasar a Live. 43 pruebas del motor pasan (3 ignoradas, 5 E2E excluidas), la suite de aplicación/integración y Clippy con `-D warnings` pasan. Fixtures temporales sin descubrimiento externo.
