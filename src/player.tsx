@@ -7,7 +7,7 @@ import { Playing, Snapshot, clock } from "./types";
 import { Button, Icon } from "./ui";
 import { createVideoClickHandler, handlePlayerEscape, resolvePlaybackEngine } from "./player-controls";
 import { TrackMenu } from "./track-menu";
-import { DownloadMap } from "./download-map";
+import { PlaybackTimeline } from "./playback-timeline";
 import { usePlayerPresentation } from "./use-player-presentation";
 type Track = { id: number; name: string };
 type NativeStatus = {
@@ -523,21 +523,14 @@ export function Player({
         )}
         <div className="seek-row">
           <span>{clock(time)}</span>
-          <div className="playback-timeline">
-            <input
-              type="range"
-              aria-label="Playback position"
-              min={0}
-              max={Number.isFinite(duration) && duration > 0 ? duration : 1}
-              step="0.1"
-              value={Math.min(
-                time,
-                Number.isFinite(duration) && duration > 0 ? duration : 1,
-              )}
-              onChange={(e) => seek(Number(e.target.value))}
-            />
-            <DownloadMap key={`${playing.id}:${playing.index}`} id={playing.id} index={playing.index} />
-          </div>
+          <PlaybackTimeline
+            key={`${playing.id}:${playing.index}`}
+            id={playing.id}
+            index={playing.index}
+            time={time}
+            duration={duration}
+            onSeek={seek}
+          />
           <span>{clock(duration)}</span>
         </div>
         <div className="player-controls">

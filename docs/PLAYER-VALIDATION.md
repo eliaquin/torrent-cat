@@ -26,3 +26,10 @@ Test fixtures and profiles are local, ignored files and are not included in the 
 - Three Rust regression tests check actual macOS assertions: release/reopen, shutdown rejecting late playback, and owner termination without cleanup.
 - The release app was tested with an isolated offline profile. `pmset -g assertions` confirmed sleep prevention during playback and its removal after returning to the library, quitting with Cmd-Q, closing the window, and forcibly terminating the app with SIGKILL.
 - `caffeinate` now watches the app PID; normal player/app closure also explicitly terminates and reaps it.
+
+## Unified timeline — 2026-10-16
+
+- Downloaded byte ranges and elapsed playback share one rail. Download gaps remain visible behind the elapsed fill; seeking still uses time.
+- Browser checks covered partial, complete, empty and unavailable download maps, unknown duration, click/drag seeking, and Home/End/arrow keys.
+- The installed macOS release was checked with native VLC in windowed and fullscreen playback, including seeking and accessible time/download descriptions.
+- TypeScript/Vite build, 16 player tests and the signed release bundle pass.

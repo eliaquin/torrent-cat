@@ -1154,6 +1154,8 @@ html.native-playback,
 .playback-timeline {
   flex: 1;
   min-width: 0;
+  position: relative;
+  height: 24px;
 }
 .player-controls {
   display: flex;
@@ -1194,33 +1196,80 @@ html.native-playback,
 .player-message.has-error {
   color: #ffb3aa;
 }
-/* Download progress sits just below the seek control without taking a row. */
-.playback-timeline {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-.playback-timeline > input {
-  width: 100%;
-  margin: 0;
+/* One rail: downloaded byte ranges underneath a thinner elapsed-time fill.
+   Keep the edges visible so seeking past a missing piece never conceals it. */
+.timeline-track {
+  position: absolute;
+  inset: 8px;
+  background: #343b44;
+  border-radius: 4px;
+  overflow: hidden;
+  pointer-events: none;
 }
 .download-progress {
-  /* Inset the thin line to visually align with the seek track's rounded caps. */
-  width: calc(100% - 6px);
-  margin-inline: 3px;
-  height: 2px;
-  display: block;
-  flex-shrink: 0;
-  background: #343b44;
-  border-radius: 2px;
-  overflow: hidden;
-  opacity: .65;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
 }
-.download-progress path { fill: #71d5e6; }
+.download-progress path { fill: #3d8490; }
+.timeline-played {
+  position: absolute;
+  top: 2.5px;
+  height: 3px;
+  background: #71d5e6;
+  border-radius: inherit;
+}
 input[type="range"] {
   accent-color: #71d5e6;
   height: 14px;
 }
+.playback-timeline > input[type="range"] {
+  position: relative;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.playback-timeline > input:focus-visible {
+  outline: 2px solid #71d5e6;
+  outline-offset: 2px;
+}
+.playback-timeline > input:disabled { cursor: default; }
+.playback-timeline > input::-webkit-slider-runnable-track {
+  height: 8px;
+  background: transparent;
+}
+.playback-timeline > input::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px #0008;
+}
+.playback-timeline > input::-moz-range-track {
+  height: 8px;
+  background: transparent;
+}
+.playback-timeline > input::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px #0008;
+}
+.playback-timeline > input:disabled::-webkit-slider-thumb { opacity: 0; }
+.playback-timeline > input:disabled::-moz-range-thumb { opacity: 0; }
 .col-select input {
   accent-color: #71d5e6;
 }
