@@ -10,8 +10,8 @@ Las referencias de líneas de la auditoría describen el commit base, no el cód
 | F2 — asociación de respuestas UDP | Integrado en `eb6252f` y publicado | Pruebas UDP del crate y `tracker_tests` |
 | F3 — límites de entradas | Integrado en `4c970bd` y publicado | Parser, cuerpos HTTP, URL y tracker locales |
 | F4 — integridad y durabilidad de reanudación | Integrado en `0b5d79c` y publicado | Hash completo, checkpoints y recheck manual |
-| F5 — capacidad, cancelación y equidad de subida | Implementado, revisado y validado | Colas acotadas y peer loopback |
-| F6 — niveles y failover de trackers | Pendiente | |
+| F5 — capacidad, cancelación y equidad de subida | Integrado en `a63b626` y publicado | Colas acotadas y peer loopback |
+| F6 — niveles y failover de trackers | Implementado, revisado y validado | Niveles, promoción y barrera privada |
 | F7 — recuperación y URLData UDP | Pendiente | |
 | F8 — extensiones y PEX | Pendiente | |
 | F9 — ciclo de vida y persistencia | Pendiente | |
@@ -75,3 +75,13 @@ Las conexiones empiezan choked, admiten subida al recibir Interested y vuelven a
 Self-review: la prueba de wire descubrió que el handshake entrante consultaba nuestras capacidades y registraba nuestro ID, en lugar del handshake recibido. Se corrigieron ambas referencias. La identidad de cada reserva evita que el Drop de una solicitud cancelada elimine una solicitud nueva del mismo bloque. Mantener el permiso hasta Drop evita que alternar Request/Cancel acumule nodos sin presupuesto. Se corrigió también la capacidad mínima del rate limiter, que antes podía terminar el scheduler con tasas menores que 16 KiB/s.
 
 Validación: 35 pruebas del motor pasan, 3 ignoradas y 5 E2E excluidas; incluye 100.000 solicitudes duplicadas, consumidores lentos, límite global, cancelación/repetición y round robin. Metadata de 32 MiB inicia 64 peticiones y repone una por respuesta. Un peer TCP loopback comprueba bitfield sin Unchoke anticipado, Interested, payload, Cancel/NotInterested durante espera de velocidad y reanudación. Suite de aplicación y Clippy del motor con `-D warnings` pasan. Sin hallazgos bloqueantes restantes en el diff.
+
+## F6: niveles y cambio privado con barrera
+
+Se conserva `announce-list` desde el metainfo original, también al restaurar ese archivo. Su presencia excluye `announce`. Los niveles se recorren en orden, las URLs de cada nivel se mezclan al iniciar y la URL exitosa se promueve dentro de su nivel. Los públicos vuelven a probar desde el primer nivel en cada anuncio. Los privados conservan su tracker actual hasta que falla. Los trackers adicionales de aplicación solo son respaldos para torrents públicos.
+
+Antes de anunciar a otro tracker privado, la corriente de descubrimiento drena las direcciones previas y solicita una barrera de desconexión. Cada generación de peers tiene cancelación y tareas registradas. La barrera cierra admisión, cancela conexiones, espera sus tareas y elimina estados anteriores; las colas y reintentos conservan su generación y no pueden entrar en la nueva. Las reservas de piezas se liberan al cerrar cada conexión. Si el cierre falla o excede 5 s, se mantiene deshabilitada la admisión y no se contacta al respaldo. Se envía stopped al tracker anterior antes del nuevo started. La resolución de magnets aún desconocidos mantiene la política conservadora: no cambia de tracker sin un torrent administrado sobre el que aplicar aislamiento.
+
+Self-review: se separó la referencia del consumidor a estadísticas de la referencia al emisor, evitando que una referencia circular mantuviera abierta la corriente al terminar el worker. Se verificó el registro de tareas bajo el mismo lock que cierra admisión, y se añadieron generaciones a los reintentos y a los peers que esperan un permiso. El parser distingue la ausencia de `announce-list` de una lista presente vacía, sin volver a `announce`. El crate de tracker declara sus propias features Tokio de pruebas, para que sus pruebas HTTP funcionen independientemente del workspace.
+
+Validación: 36 pruebas del motor pasan (3 ignoradas, 5 E2E excluidas), 12 de tracker pasan (1 pública ignorada) y la suite de aplicación/integración pasa. Casos: prioridad entre niveles, promoción dentro de un nivel, deduplicación, preservación del metainfo, rechazo de trackers globales privados, desconexión TCP anterior, descarte de peers pendientes con límite de una conexión, conexión al nuevo peer y ausencia de failback mientras el respaldo funciona. Una prueba con barrera detenida confirma cero anuncios al respaldo hasta liberarla; un error inyectado impide el cambio. Clippy con `-D warnings` y revisión del diff pasan. Referencias: [BEP 12](https://www.bittorrent.org/beps/bep_0012.html), [BEP 27](https://www.bittorrent.org/beps/bep_0027.html).

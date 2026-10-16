@@ -26,10 +26,13 @@ TorrentCat modifications:
 - Send HTTP/UDP lifecycle events and await bounded stopped requests on pause,
   removal and shutdown. Respect both tracker interval and minimum interval;
   retain and safely encode HTTP tracker IDs.
-- Preserve private tracker ordering; use only the first eligible tracker, without
-  global/custom trackers, initial peers, DHT, LSD, PEX or metadata sharing.
+- Preserve announce tiers, shuffle and promote successful URLs within each tier.
+  Private failover waits for old peers to disconnect and discards their queued
+  connections/retries; no global/custom trackers, initial peers, DHT, LSD, PEX
+  or metadata sharing for private torrents.
 - Resolve unknown magnets through an explicit tracker only; require the original
-  `.torrent` file for private torrents. No automatic private tracker failover.
+  `.torrent` file for private torrents. Unknown magnets cannot switch trackers
+  before peer isolation is available.
 - Avoid logging tracker URLs, passkeys or tracker failure text in announce errors.
 
 Changes include the component `Cargo.toml` files, `librqbit/src/session.rs`,

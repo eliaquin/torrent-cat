@@ -1169,17 +1169,10 @@ impl Session {
                         }
                     };
 
-                    let mut trackers = torrent
-                        .meta
-                        .iter_announce()
-                        .unique()
-                        .filter_map(|tracker| match std::str::from_utf8(tracker.as_ref()) {
-                            Ok(url) => Some(url.to_owned()),
-                            Err(_) => {
-                                warn!("cannot parse tracker url as utf-8, ignoring");
-                                None
-                            }
-                        })
+                    let mut trackers = tracker_tiers_from_bytes(&torrent.torrent_bytes, &[])?
+                        .into_iter()
+                        .flatten()
+                        .map(|url| url.to_string())
                         .collect::<Vec<_>>();
                     if !torrent.meta.info.data.private
                         && let Some(custom_trackers) = opts.trackers.clone()
@@ -1289,10 +1282,16 @@ impl Session {
         // Unknown hashes must not be broadcast before their privacy flag is known.
         let private = metadata.as_ref().is_none_or(|m| m.info.info().private);
 
+        let tracker_tiers = metadata
+            .as_ref()
+            .map(|m| tracker_tiers_from_bytes(&m.torrent_bytes, &trackers))
+            .transpose()?
+            .unwrap_or_else(|| vec![trackers.clone()]);
+
         let make_peer_rx = || {
             self.make_peer_rx(
                 info_hash,
-                trackers.clone(),
+                tracker_tiers.clone(),
                 !opts.paused && !opts.list_only,
                 opts.force_tracker_interval,
                 opts.initial_peers.clone().unwrap_or_default(),
@@ -1335,7 +1334,7 @@ impl Session {
                     let peer_rx = if !opts.paused && !opts.list_only {
                         self.make_peer_rx(
                             info_hash,
-                            trackers.clone(),
+                            tracker_tiers.clone(),
                             true,
                             opts.force_tracker_interval,
                             seen_peers.clone(),
@@ -1422,6 +1421,7 @@ impl Session {
                 span,
                 info_hash,
                 trackers: trackers.into_iter().unique().collect(),
+                tracker_tiers,
                 tracker_downloaded: AtomicU64::new(0),
                 tracker_uploaded: AtomicU64::new(0),
                 tracker_have: AtomicU64::new(0),
@@ -1602,7 +1602,7 @@ impl Session {
         let is_private = t.with_metadata(|m| m.info.info().private).unwrap_or(true);
         self.make_peer_rx(
             t.info_hash(),
-            t.shared().trackers.to_vec(),
+            t.shared().tracker_tiers.clone(),
             announce,
             t.shared().options.force_tracker_interval,
             t.shared().options.initial_peers.clone(),
@@ -1614,7 +1614,7 @@ impl Session {
     fn make_peer_rx(
         self: &Arc<Self>,
         info_hash: Id20,
-        mut trackers: Vec<url::Url>,
+        mut trackers: Vec<Vec<url::Url>>,
         announce: bool,
         force_tracker_interval: Option<Duration>,
         initial_peers: Vec<SocketAddr>,
@@ -1642,7 +1642,7 @@ impl Session {
 
         // Never append global trackers for private torrents or unknown magnets.
         if !is_private && !self.disable_trackers {
-            trackers.extend(self.trackers.iter().cloned());
+            trackers.extend(self.trackers.iter().cloned().map(|u| vec![u]));
         }
         let tasks = self
             .tracker_tasks
@@ -1661,7 +1661,7 @@ impl Session {
         let tracker_rx = TrackerComms::start(
             info_hash,
             self.peer_id,
-            trackers.into_iter().unique().collect(),
+            trackers,
             Box::new(tracker_rx_stats),
             force_tracker_interval,
             self.announce_port().unwrap_or(4240),
@@ -1889,6 +1889,42 @@ fn remove_files_and_dirs(infos: &FileInfos, files: &dyn TorrentStorage) {
     }
 }
 
+// Preserve BEP 12 tiers from original metainfo. Extra public trackers form
+// fallback tiers; private torrents never receive them from callers.
+fn tracker_tiers_from_bytes(
+    bytes: &[u8],
+    trackers: &[url::Url],
+) -> anyhow::Result<Vec<Vec<url::Url>>> {
+    let meta = librqbit_core::torrent_metainfo::torrent_from_bytes(bytes)?;
+    #[derive(serde::Deserialize)]
+    struct AnnounceMetadata {
+        announce: Option<buffers::ByteBufOwned>,
+        #[serde(rename = "announce-list")]
+        announce_list: Option<Vec<Vec<buffers::ByteBufOwned>>>,
+    }
+    let raw: AnnounceMetadata = bencode::from_bytes(bytes).map_err(|e| e.into_kind())?;
+    let parse = |raw: &buffers::ByteBufOwned| {
+        std::str::from_utf8(raw.as_ref())
+            .ok()
+            .and_then(|s| url::Url::parse(s).ok())
+    };
+    let mut tiers: Vec<Vec<url::Url>> = match raw.announce_list {
+        Some(list) => list
+            .iter()
+            .map(|tier| tier.iter().filter_map(parse).collect())
+            .collect(),
+        None => vec![raw.announce.iter().filter_map(parse).collect()],
+    };
+    if !meta.info.data.private {
+        for tracker in trackers {
+            if !tiers.iter().flatten().any(|u| u == tracker) {
+                tiers.push(vec![tracker.clone()]);
+            }
+        }
+    }
+    Ok(tiers)
+}
+
 // Ad adapter for converting stats into the format that tracker_comms accepts.
 struct PeerRxTorrentInfo {
     info_hash: Id20,
@@ -1901,6 +1937,25 @@ struct PeerRxTorrentInfo {
 impl tracker_comms::TorrentStatsProvider for PeerRxTorrentInfo {
     fn is_private(&self) -> bool {
         self.private
+    }
+    fn disconnect_for_tracker_switch(&self) -> BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async move {
+            let mt = self
+                .session
+                .with_torrents(|torrents| {
+                    for (_, t) in torrents {
+                        if t.info_hash() == self.info_hash {
+                            return Some(t.clone());
+                        }
+                    }
+                    None
+                })
+                .context("cannot switch trackers during metadata discovery")?;
+            if let Some(live) = mt.live() {
+                live.disconnect_for_tracker_switch().await?;
+            }
+            Ok(())
+        })
     }
     fn wait_for_transfers(&self) -> BoxFuture<'_, ()> {
         let cached = self.cached.read().clone();
@@ -1944,6 +1999,35 @@ mod tests {
     use librqbit_core::torrent_metainfo::{TorrentMetaV1, torrent_from_bytes};
 
     use super::torrent_file_from_info_bytes;
+
+    #[test]
+    fn tiers_survive_original_metadata_and_ignore_announce_when_list_is_present() {
+        let url = |s: &str| url::Url::parse(s).unwrap();
+        for private in [false, true] {
+            let source = include_bytes!("../resources/ubuntu-21.04-desktop-amd64.iso.torrent");
+            let mut meta = torrent_from_bytes(source).unwrap();
+            meta.info.data.private = private;
+            meta.announce = Some(ByteBuf(b"http://127.0.0.1/ignored"));
+            meta.announce_list = vec![
+                vec![
+                    ByteBuf(b"http://127.0.0.1/a"),
+                    ByteBuf(b"http://127.0.0.1/b"),
+                ],
+                vec![ByteBuf(b"http://127.0.0.1/c")],
+            ];
+            let mut bytes = Vec::new();
+            bencode::bencode_serialize_to_writer(&meta, &mut bytes).unwrap();
+            let tiers =
+                super::tracker_tiers_from_bytes(&bytes, &[url("http://127.0.0.1/custom")]).unwrap();
+            assert_eq!(
+                tiers[0],
+                vec![url("http://127.0.0.1/a"), url("http://127.0.0.1/b")]
+            );
+            assert_eq!(tiers[1], vec![url("http://127.0.0.1/c")]);
+            assert_eq!(tiers.len(), if private { 2 } else { 3 });
+            assert!(!tiers.iter().flatten().any(|u| u.path() == "/ignored"));
+        }
+    }
 
     #[test]
     fn test_torrent_file_from_info_and_bytes() {
