@@ -320,19 +320,6 @@ function App() {
             className="torrent-list media-shelf"
             aria-label="Torrent library"
           >
-            <div className="shelf-heading">
-              <div>
-                <h1>Watch something</h1>
-                <p>Your media, ready when you are.</p>
-              </div>
-              <Button
-                icon="add"
-                className="shelf-primary"
-                onClick={() => setModal("add")}
-              >
-                Add torrent
-              </Button>
-            </div>
             {!data.tools.vlc && <VlcRecommendation report={report} />}
             <div className="shelf-toolbar">
               <div
@@ -350,15 +337,24 @@ function App() {
                   </button>
                 ))}
               </div>
-              <label className="shelf-search">
-                <Icon name="search" />
-                <input
-                  aria-label="Search library"
-                  placeholder="Search library"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                />
-              </label>
+              <div className="shelf-actions">
+                <label className="shelf-search">
+                  <Icon name="search" />
+                  <input
+                    aria-label="Search library"
+                    placeholder="Search library"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                  />
+                </label>
+                <Button
+                  icon="add"
+                  className="shelf-primary"
+                  onClick={() => setModal("add")}
+                >
+                  Add torrent
+                </Button>
+              </div>
             </div>
             {!data.downloadPathExists && (
               <div className="shelf-warning">

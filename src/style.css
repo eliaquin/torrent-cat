@@ -55,23 +55,6 @@
   --control-text: var(--shelf-text);
   --control-accent: var(--shelf-accent);
 }
-.shelf-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 24px;
-}
-.shelf-heading h1 {
-  margin: 0;
-  font-size: 26px;
-  line-height: 1.25;
-  letter-spacing: -0.7px;
-}
-.shelf-heading p {
-  margin: 7px 0 0;
-  color: var(--shelf-muted);
-}
 .shelf-button {
   min-height: 36px;
   display: inline-flex;
@@ -129,11 +112,17 @@
   background: #253d43;
   color: var(--shelf-accent);
 }
+.shelf-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .shelf-search {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 7px 10px;
+  height: 36px;
+  padding: 0 10px;
   border: 1px solid var(--shelf-border);
   border-radius: 7px;
   width: 200px;
@@ -389,15 +378,12 @@ body.drag .media-shelf {
   .media-shelf {
     padding: 20px;
   }
-  .shelf-search {
+  .shelf-actions {
     width: 100%;
   }
-  .shelf-heading {
-    align-items: flex-start;
-    flex-wrap: wrap;
-  }
-  .shelf-heading h1 {
-    font-size: 24px;
+  .shelf-search {
+    flex: 1;
+    width: auto;
   }
   .shelf-grid {
     grid-template-columns: minmax(0, 1fr);
