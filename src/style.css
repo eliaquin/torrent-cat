@@ -404,121 +404,15 @@ body.drag .media-shelf {
   }
 }
 
-/* Preferences share the library palette and controls. */
-.preferences-page {
-  --control-text: var(--shelf-text);
-  --control-muted: var(--shelf-muted);
-  --control-surface: var(--shelf-bg);
-  --control-border: var(--shelf-border);
-  --control-accent: var(--shelf-accent);
-  max-width: 1120px;
-  margin: 0 auto;
-  padding: 28px;
-  min-height: 100%;
-}
-.preferences-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 14px;
-  margin-bottom: 32px;
-}
-.preferences-heading h1 {
-  margin: 0;
-  font-size: 26px;
-  line-height: 1.25;
-  letter-spacing: -0.7px;
-}
-.preferences-heading p {
-  margin: 7px 0 0;
-  color: var(--shelf-muted);
-}
-.preferences-autosave {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--shelf-muted);
-  font-size: 12px;
-}
-.preferences-autosave .icon {
-  color: var(--shelf-accent);
-  font-size: 16px;
-}
-.preferences-layout {
-  display: grid;
-  grid-template-columns: 150px minmax(0, 1fr);
-  gap: 28px;
-  align-items: start;
-}
-.preferences-index {
-  position: sticky;
-  top: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.preferences-index button {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--shelf-muted);
-  font: inherit;
-  text-align: left;
-}
-.preferences-index button .icon {
-  font-size: 20px;
-}
-.preferences-index button:hover {
-  background: var(--shelf-surface);
-  color: var(--shelf-text);
-}
-.preferences-index button:focus-visible,
-.preferences-page select:focus-visible {
-  outline: 2px solid var(--shelf-accent);
-  outline-offset: 2px;
-}
-.preferences-section {
-  margin-bottom: 28px;
-}
-.preferences-section:last-child {
-  margin-bottom: 0;
-}
-.preferences-section-heading {
-  margin-bottom: 12px;
-}
-.preferences-section h2 {
-  margin: 0;
-  font-size: 18px;
-  line-height: 1.4;
-  scroll-margin-top: 20px;
-}
-.preferences-section h2:focus-visible {
-  outline: 2px solid var(--shelf-accent);
-  outline-offset: 4px;
-  border-radius: 2px;
-}
-.preferences-section-heading p {
-  margin: 5px 0 0;
-  font-size: 13px;
-  color: var(--shelf-muted);
-}
+/* Shared form groups (also used by Create torrent). */
 .preferences-card {
   border: 1px solid var(--shelf-border);
   border-radius: 10px;
   background: var(--shelf-surface);
   overflow: hidden;
 }
-.preference {
-  padding: 18px 20px;
-}
-.preference + .preference {
-  border-top: 1px solid var(--shelf-border);
-}
+.preference { padding: 18px 20px; }
+.preference + .preference { border-top: 1px solid var(--shelf-border); }
 .preference p {
   margin: 8px 0 0;
   color: var(--shelf-muted);
@@ -526,88 +420,11 @@ body.drag .media-shelf {
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
-.preference-label,
-.path-selector > label,
-.preference-select > label {
-  display: block;
-  font-weight: 500;
-}
 .path-selector-controls {
   display: flex;
   gap: 10px;
   align-items: center;
   margin-top: 10px;
-}
-.path-selector-controls .ui-text-field {
-  flex: 1;
-}
-.preferences-page .ui-text-field input,
-.preferences-page .ui-text-field textarea {
-  border: 1px solid var(--shelf-border);
-  border-radius: 7px;
-  background: var(--shelf-bg);
-  padding: 9px 12px;
-}
-.preferences-page .ui-text-field input {
-  text-overflow: ellipsis;
-}
-.preferences-page .ui-text-field input:focus,
-.preferences-page .ui-text-field textarea:focus {
-  border: 1px solid var(--shelf-accent);
-  box-shadow: 0 0 0 1px var(--shelf-accent);
-}
-.preferences-page .ui-button {
-  border: 1px solid var(--shelf-border);
-  border-radius: 7px;
-  box-shadow: none;
-  text-transform: none;
-  min-height: 40px;
-}
-.preference > .ui-button {
-  margin-top: 12px;
-}
-.preferences-page .ui-checkbox {
-  display: flex;
-  flex-direction: row-reverse;
-  justify-content: space-between;
-  gap: 20px;
-  width: 100%;
-  font-weight: 500;
-}
-.preferences-page .ui-checkbox span {
-  flex: 1;
-}
-.preferences-page .ui-checkbox input {
-  appearance: none;
-  flex: 0 0 36px;
-  width: 36px;
-  height: 22px;
-  border: 1px solid #687381;
-  border-radius: 12px;
-  background: #343b44;
-  position: relative;
-  transition:
-    background 0.15s,
-    border-color 0.15s;
-}
-.preferences-page .ui-checkbox input::before {
-  content: "";
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--shelf-text);
-  transition: transform 0.15s;
-}
-.preferences-page .ui-checkbox input:checked {
-  background: var(--shelf-accent);
-  border-color: var(--shelf-accent);
-}
-.preferences-page .ui-checkbox input:checked::before {
-  transform: translateX(14px);
-  background: var(--shelf-bg);
 }
 .preference-select {
   display: flex;
@@ -616,62 +433,184 @@ body.drag .media-shelf {
   gap: 12px;
   flex-wrap: wrap;
 }
-.preferences-page select {
-  max-width: 100%;
-  padding: 9px 12px;
-  border: 1px solid var(--shelf-border);
-  border-radius: 7px;
-  background: var(--shelf-bg);
-  color: var(--shelf-text);
-  font: inherit;
+
+/* Desktop preferences: fixed category navigation and independently scrolling panes. */
+.view-preferences .content { overflow: hidden; }
+.preferences-page {
+  display: grid;
+  grid-template-columns: 164px minmax(0, 1fr);
+  height: 100%;
+  font-size: 13px;
+  line-height: 1.4;
 }
-.preference .preference-status {
+.preferences-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 16px 10px 12px;
+  background: #202328;
+  border-right: 1px solid #ffffff0b;
+  user-select: none;
+}
+.preferences-index {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.preferences-index button {
   display: flex;
   align-items: center;
-  gap: 7px;
-  color: var(--shelf-accent);
+  gap: 9px;
+  width: 100%;
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #c3c8d0;
+  font: inherit;
+  text-align: left;
 }
-.preference-status .icon {
-  font-size: 18px;
+.preferences-index button .icon { font-size: 19px; }
+.preferences-index button:hover { background: #ffffff08; }
+.preferences-index button[aria-selected="true"] {
+  background: #36464f;
+  color: #fff;
 }
-.preferences-page .torrent-trackers {
-  margin-top: 12px;
+.preferences-index button:focus-visible,
+.preferences-page :is(input, select, textarea, button):focus-visible {
+  outline: 2px solid var(--shelf-accent);
+  outline-offset: 2px;
 }
-@media (max-width: 680px) {
-  .preferences-page {
-    padding: 20px;
-  }
-  .preferences-heading {
-    margin-bottom: 20px;
-  }
-  .preferences-layout {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 20px;
-  }
-  .preferences-index {
-    position: static;
-    flex-direction: row;
-    flex-wrap: wrap;
-    border-bottom: 1px solid var(--shelf-border);
-    padding-bottom: 12px;
-  }
-  .preferences-index button {
-    padding: 8px 10px;
-    gap: 6px;
-    font-size: 13px;
-  }
-  .preferences-index button .icon {
-    font-size: 18px;
-  }
-  .preference {
-    padding: 16px;
-  }
+.preferences-footer {
+  margin-top: auto;
+  padding: 24px 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: #929ba6;
+  font-size: 11px;
 }
-@media (prefers-reduced-motion: reduce) {
-  .preferences-page .ui-checkbox input,
-  .preferences-page .ui-checkbox input::before {
-    transition: none;
-  }
+.preferences-footer [role="status"] { font-size: 10px; }
+.preferences-detail {
+  min-width: 0;
+  overflow: auto;
+  padding: 20px 24px 28px;
+  background: #1b1d22;
+}
+.preferences-section {
+  max-width: 680px;
+  margin: 0 auto;
+}
+.preferences-section[hidden] { display: none; }
+.preferences-section:focus-visible {
+  outline: 2px solid var(--shelf-accent);
+  outline-offset: 6px;
+  border-radius: 4px;
+}
+.preferences-section-heading { margin-bottom: 14px; }
+.preferences-section h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 24px;
+}
+.preferences-page .preferences-card {
+  border-radius: 7px;
+  border-color: #ffffff10;
+  background: #25282e;
+}
+.preferences-page .preference { padding: 12px 14px; }
+.preferences-page .preference + .preference { border-color: #ffffff0c; }
+.preferences-page .preference :is(strong, label) { font-weight: 400; }
+.preferences-page .preference p {
+  margin-top: 5px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #a1a8b3;
+}
+.preferences-page .preference p + p { margin-top: 3px; }
+.preferences-page .path-selector-controls { gap: 7px; margin-top: 7px; }
+.preferences-page .text-input {
+  min-width: 0;
+  border: 1px solid #ffffff18;
+  border-radius: 4px;
+  background: #1b1d22;
+  padding: 5px 7px;
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+.preferences-page .text-input[readonly] { color: #bcc3cc; }
+.preferences-page .shelf-button {
+  min-height: 26px;
+  padding: 3px 10px;
+  border: 1px solid #ffffff18;
+  border-radius: 5px;
+  background: linear-gradient(#45494f, #393d43);
+  box-shadow: 0 1px 2px #0003;
+  font-size: 12px;
+  line-height: 18px;
+}
+.preferences-page .shelf-button:hover:not(:disabled) { background: #4a4f56; }
+.preferences-page .shelf-button:active:not(:disabled) { background: #31363c; }
+.preferences-page .preference select {
+  max-width: 100%;
+  min-height: 26px;
+  padding: 3px 7px;
+  border: 1px solid #ffffff18;
+  border-radius: 5px;
+  color: inherit;
+  background: #3c4047;
+  font: inherit;
+  font-size: 12px;
+}
+.preferences-page .toggle-row { gap: 12px; }
+.preferences-page .toggle-row > input {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 17px;
+  margin: 0;
+  border-color: #ffffff25;
+}
+.preferences-page .toggle-row > input:before {
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+}
+.preferences-page .toggle-row > input:checked:before { transform: translateX(11px); }
+.preferences-page .preference-path {
+  display: grid;
+  grid-template-columns: 126px minmax(0, 1fr);
+  column-gap: 12px;
+  align-items: center;
+}
+.preferences-page .preference-path .path-selector-controls { margin: 0; }
+.preferences-page .preference-path p { grid-column: 2; }
+.preferences-page .preference-default {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 14px;
+  align-items: center;
+}
+.preferences-page .preference-default p { grid-column: 1; }
+.preferences-page .preference-default button { grid-column: 2; grid-row: 1 / 4; }
+.preferences-page textarea.text-input {
+  min-height: 180px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  line-height: 1.6;
+}
+.preferences-page .vlc-recommendation {
+  padding: 0;
+  border: 0;
+  background: none;
+  gap: 10px;
+}
+@media (max-width: 760px) {
+  .preferences-page { grid-template-columns: 142px minmax(0, 1fr); }
+  .preferences-detail { padding: 16px; }
+  .preferences-page .preference-path { display: block; }
+  .preferences-page .preference-path .path-selector-controls { margin-top: 7px; }
 }
 @font-face {
   font-family: "Material Icons";
@@ -1307,18 +1246,12 @@ input[type="range"] {
 .col-select input {
   accent-color: #71d5e6;
 }
-.preferences-section {
-  scroll-margin-top: 20px;
-}
 .shelf-button:empty {
   width: 36px;
 }
 @media (max-width: 800px) {
   .player-controls {
     flex-wrap: wrap;
-  }
-  .preferences-page {
-    padding: 20px;
   }
 }
 
@@ -1512,3 +1445,49 @@ input[type="range"] {
   background: #17191de6;
   font-variant-numeric: tabular-nums;
 }
+
+/* Keep the app title geometrically centered, reserving equal space on both
+   sides for the macOS traffic lights. Navigation lives below the title bar. */
+:is(.view-home, .view-preferences) > .header { padding: 0 84px; }
+:is(.view-home, .view-preferences) > .header .title {
+  padding: 0;
+  color: #dce0e6;
+  font-size: 13px;
+  font-weight: 600;
+}
+.workspace-tabs {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  padding: 7px 16px;
+  background: #202328;
+  border-bottom: 1px solid #ffffff0d;
+}
+.workspace-tabs button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 128px;
+  height: 27px;
+  padding: 0 14px;
+  border: 1px solid #ffffff0d;
+  background: #181b20;
+  color: #b2bac5;
+  font-size: 12px;
+}
+.workspace-tabs button:first-child { border-radius: 5px 0 0 5px; }
+.workspace-tabs button:last-child { border-radius: 0 5px 5px 0; }
+.workspace-tabs button[aria-selected="true"] {
+  background: #454a52;
+  color: #fff;
+  box-shadow: 0 1px 3px #0004;
+}
+.workspace-tabs button:hover:not([aria-selected="true"]) { background: #2c3037; }
+.workspace-tabs button:focus-visible {
+  position: relative;
+  outline: 2px solid var(--shelf-accent);
+  outline-offset: 2px;
+  z-index: 1;
+}
+.workspace-tabs .icon { font-size: 16px; }

@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { AppTabs } from "./app-tabs";
 import { Settings, Create } from "./settings";
 import { Button, Icon, Dialog } from "./ui";
 import {
@@ -253,39 +254,23 @@ function App() {
   return (
     <div className={`app view-${page} is-darwin is-focused`}>
       <header className="header" data-tauri-drag-region>
-        <nav className="app-navigation" aria-label="Main navigation">
-          {["home", "preferences"].includes(page) ? (
-            <>
-              <button
-                aria-current={page === "home" ? "page" : undefined}
-                onClick={() => setPage("home")}
-              >
-                <Icon name="video_library" />
-                Library
-              </button>
-              <button
-                aria-current={page === "preferences" ? "page" : undefined}
-                onClick={() => setPage("preferences")}
-              >
-                <Icon name="settings" />
-                Preferences
-              </button>
-            </>
-          ) : (
+        {page !== "home" && page !== "preferences" && (
+          <nav className="app-navigation" aria-label="Main navigation">
             <button onClick={() => void back()}>
               <Icon name="arrow_back" />
               Back to library
             </button>
-          )}
-        </nav>
+          </nav>
+        )}
         <div className="title" data-tauri-drag-region>
           {page === "player"
             ? <FullName name={playing?.name || ""} dragRegion />
             : page === "create"
               ? "Create torrent"
-              : ""}
+              : "TorrentCat"}
         </div>
       </header>
+      {(page === "home" || page === "preferences") && <AppTabs page={page} onChange={setPage} />}
       {notice && (
         <div className="notice" role="alert">
           <span>{notice}</span>
@@ -309,7 +294,9 @@ function App() {
           </button>
         </div>
       )}
-      <main className="content">
+      <main className="content" id="workspace-panel"
+        role={page === "home" || page === "preferences" ? "tabpanel" : undefined}
+        aria-labelledby={page === "home" || page === "preferences" ? `workspace-tab-${page}` : undefined}>
         {!data ? (
           <div className="shelf-empty">
             <span className="spinner" />
