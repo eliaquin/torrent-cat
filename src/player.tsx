@@ -552,6 +552,7 @@ export function Player({
             time={time}
             duration={duration}
             onSeek={seek}
+            previews={data.tools.ffmpeg && engine !== "external"}
           />
           <span>{clock(duration)}</span>
         </div>

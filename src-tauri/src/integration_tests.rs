@@ -479,6 +479,9 @@ async fn media_tools_preserve_original_and_serve_compatible_outputs() {
     .await
     .unwrap()
     .unwrap();
+    let preview = crate::jobs::preview(&core, id, 0, 1.0).await.unwrap().expect("downloaded video has a preview");
+    assert_eq!(&preview[..2], &[0xff, 0xd8]);
+    assert!(crate::jobs::preview(&core, id, 0, f64::NAN).await.is_err());
     let probe = crate::jobs::probe(&core, id, 0).await.unwrap();
     assert!(
         probe["streams"]
@@ -844,4 +847,45 @@ async fn library_snapshot_retains_missing_metadata_and_repairs_original_entry() 
     assert_eq!(std::fs::read(source).unwrap(), vec![42; 16384]);
     reopened.media.shutdown().await;
     reopened.api.session().stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn previews_decode_downloaded_frames_without_fetching_missing_pieces() {
+    let Some(ffmpeg) = crate::jobs::tool("ffmpeg") else { return; };
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("movie.mp4");
+    let status = tokio::process::Command::new(ffmpeg).args([
+        "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24",
+        "-t", "12", "-c:v", "libx264", "-preset", "ultrafast", "-g", "24",
+        "-movflags", "+faststart",
+    ]).arg(&source).status().await.unwrap();
+    assert!(status.success());
+    let torrent = lava_torrent::torrent::v1::TorrentBuilder::new(source.clone(), 16_384)
+        .set_num_threads(2).build().unwrap();
+    let mut metadata = Vec::new();
+    torrent.write_into(&mut metadata).unwrap();
+    let downloads = root.path().join("downloads");
+    std::fs::create_dir(&downloads).unwrap();
+    let mut bytes = std::fs::read(source).unwrap();
+    let cutoff = (bytes.len() / 2 / 16_384) * 16_384;
+    bytes[cutoff..].fill(0);
+    std::fs::write(downloads.join("movie.mp4"), bytes).unwrap();
+    let core = Core::new(root.path().join("profile"), true).await.unwrap();
+    let handle = core.api.session().add_torrent(
+        AddTorrent::TorrentFileBytes(metadata.into()), Some(AddTorrentOptions {
+            output_folder: Some(downloads.to_string_lossy().into()),
+            paused: true, overwrite: true, ..Default::default()
+        })
+    ).await.unwrap().into_handle().unwrap();
+    timeout(Duration::from_secs(20), handle.wait_until_initialized()).await.unwrap().unwrap();
+    let before = core.file_pieces(handle.id(), 0).unwrap().unwrap();
+    assert_eq!(before.downloaded_bytes, cutoff as u64);
+    let available = crate::jobs::preview(&core, handle.id(), 0, 1.0).await.unwrap();
+    assert!(available.is_some(), "early downloaded frame should be previewable");
+    let missing = crate::jobs::preview(&core, handle.id(), 0, 10.0).await.unwrap();
+    assert!(missing.is_none(), "missing frame should show only its timestamp");
+    assert_eq!(core.file_pieces(handle.id(), 0).unwrap().unwrap().ranges, before.ranges);
+    assert_eq!(core.api.api_stats_v1(TorrentIdOrHash::Id(handle.id())).unwrap().state.to_string(), "paused");
+    core.media.shutdown().await;
+    core.api.session().stop().await;
 }

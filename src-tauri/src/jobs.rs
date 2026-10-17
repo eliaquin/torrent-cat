@@ -84,6 +84,38 @@ pub async fn poster(core: &Core, id: usize, index: usize) -> Result<String> {
         .grant(Source::Local(out, "image/jpeg".into()))
         .await)
 }
+// Bound preview work independently of long conversions; never queue hover jobs.
+pub async fn preview(core: &Core, id: usize, index: usize, time: f64) -> Result<Option<Vec<u8>>> {
+    if !time.is_finite() || time < 0.0 {
+        bail!("Invalid preview time");
+    }
+    if tool("ffmpeg").is_none() { return Ok(None); }
+    let Ok(_permit) = core.preview_jobs.try_acquire() else { return Ok(None); };
+    let Some(pieces) = core.file_pieces(id, index)? else { return Ok(None); };
+    if pieces.ranges.is_empty() { return Ok(None); }
+    let path = core.file_path(id, index, false)?;
+    let url = core.media.grant(Source::Preview {
+        id, path, length: pieces.file_length, ranges: pieces.ranges,
+    }).await;
+    let mut a = args(&[
+        "-nostdin", "-v", "error", "-xerror", "-err_detect", "explode",
+        "-threads", "1", "-protocol_whitelist", "http,tcp",
+        "-rw_timeout", "1500000", "-ss",
+    ]);
+    a.push(time.to_string());
+    a.push("-i".into());
+    a.push(url.clone());
+    a.extend(args(&[
+        "-map", "0:v:0", "-an", "-sn", "-dn", "-frames:v", "1",
+        "-vf", "scale=240:135:force_original_aspect_ratio=decrease",
+        "-threads", "1", "-c:v", "mjpeg", "-q:v", "5", "-f", "image2pipe", "pipe:1",
+    ]));
+    // Missing headers, index or reference frames are normal: show just the time.
+    let result = run("ffmpeg", a, 3).await;
+    core.media.revoke(&url).await;
+    Ok(result.ok().filter(|bytes| bytes.starts_with(&[0xff, 0xd8]) && bytes.len() <= 256 * 1024))
+}
+
 async fn cache_key(path: &Path, kind: &str) -> Result<String> {
     let m = tokio::fs::metadata(path).await?;
     let mut h = Sha256::new();

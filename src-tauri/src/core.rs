@@ -61,6 +61,7 @@ pub struct Core {
     pub directory: PathBuf,
     pub media: crate::media::Media,
     pub jobs: tokio::sync::Semaphore,
+    pub preview_jobs: tokio::sync::Semaphore,
     pub(crate) playback_transition: Mutex<()>,
 }
 impl Core {
@@ -111,6 +112,7 @@ impl Core {
             directory,
             media,
             jobs: tokio::sync::Semaphore::new(2),
+            preview_jobs: tokio::sync::Semaphore::new(1),
             playback_transition: Mutex::new(()),
         });
         core.initialize_torrent_order().await?;

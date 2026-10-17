@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useTimelinePreview } from "./use-timeline-preview";
 import { bytes, clock } from "./types";
 
 type FilePieces = {
@@ -8,14 +9,19 @@ type FilePieces = {
   ranges: [number, number][];
 };
 
-export function PlaybackTimeline({ id, index, time, duration, onSeek }: {
+export function PlaybackTimeline({ id, index, time, duration, onSeek, previews = true }: {
   id: number;
   index: number;
   time: number;
   duration: number;
   onSeek: (time: number) => void;
+  previews?: boolean;
 }) {
   const descriptionId = useId();
+  const [hover, setHover] = useState<{ time: number; left: number } | null>(null);
+  const previewTime = hover && previews ? Math.floor(hover.time / 5) * 5 : null;
+  const image = useTimelinePreview(id, index, previewTime);
+  const popupWidth = image ? 240 : 56;
   const [pieces, setPieces] = useState<FilePieces | null>(null);
   useEffect(() => {
     let active = true;
@@ -49,7 +55,25 @@ export function PlaybackTimeline({ id, index, time, duration, onSeek }: {
   const length = Number.isFinite(duration) && duration > 0 ? duration : 0;
   const position = Number.isFinite(time) ? Math.max(0, Math.min(time, length)) : 0;
   return (
-    <div className="playback-timeline">
+    <div className="playback-timeline"
+      onPointerMove={(e) => {
+        if (!length || e.pointerType === "touch") return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        // Match the range input's 14px thumb travel, including both endpoints.
+        const fraction = Math.max(0, Math.min(1, (e.clientX - rect.left - 7) / Math.max(1, rect.width - 14)));
+        setHover({ time: fraction * length, left: Math.max(0, Math.min(rect.width, e.clientX - rect.left)) });
+      }}
+      onPointerLeave={() => setHover(null)}
+      onPointerCancel={() => setHover(null)}
+    >
+      {hover && length > 0 && (
+        <div className="timeline-preview" aria-hidden="true"
+          style={{ width: popupWidth, left: `clamp(0px, ${hover.left}px - ${popupWidth / 2}px, max(0px, 100% - ${popupWidth}px))` }}>
+          {image && <img src={image} alt="" onError={(e) => { e.currentTarget.style.display = "none"; }}
+            onLoad={(e) => { e.currentTarget.style.display = "block"; }} />}
+          <span>{clock(hover.time)}</span>
+        </div>
+      )}
       <div className="timeline-track" aria-hidden="true">
         <svg className="download-progress" viewBox="0 0 1 1" preserveAspectRatio="none">
           <path d={path} />
@@ -60,7 +84,6 @@ export function PlaybackTimeline({ id, index, time, duration, onSeek }: {
         aria-label="Playback position"
         aria-valuetext={`${clock(position)} of ${clock(length)}`}
         aria-describedby={descriptionId}
-        title={description}
         min={0}
         max={length || 1}
         step="0.1"

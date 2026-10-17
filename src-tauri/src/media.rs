@@ -18,6 +18,9 @@ use tokio::{
 pub enum Source {
     Torrent(usize, usize),
     Local(PathBuf, String),
+    // A snapshot of verified bytes. Never use api_stream for preview requests:
+    // registering a streaming reader would change download priorities.
+    Preview { id: usize, path: PathBuf, length: u64, ranges: Vec<[u64; 2]> },
 }
 #[derive(Clone)]
 pub struct Media {
@@ -96,6 +99,11 @@ impl Media {
         }
         format!("http://127.0.0.1:{}/media/{token}", self.port)
     }
+    pub async fn revoke(&self, url: &str) {
+        if let Some(token) = url.rsplit('/').next() {
+            self.grants.lock().await.remove(token);
+        }
+    }
     pub async fn revoke_all(&self) {
         self.grants.lock().await.clear();
     }
@@ -103,7 +111,7 @@ impl Media {
         self.grants
             .lock()
             .await
-            .retain(|_, s| !matches!(s,Source::Torrent(t,_) if *t==id));
+            .retain(|_, s| !matches!(s,Source::Torrent(t,_) | Source::Preview { id: t, .. } if *t==id));
     }
     pub async fn authorized(&self, url: &str) -> bool {
         let prefix = format!("http://127.0.0.1:{}/media/", self.port);
@@ -154,6 +162,7 @@ async fn serve(
             let f = files.get(*index).ok_or_else(|| fail("File unavailable"))?;
             (f.length, mime(&f.name).into())
         }
+        Source::Preview { length, .. } => (*length, "application/octet-stream".into()),
         Source::Local(path, kind) => (
             tokio::fs::metadata(path).await.map_err(fail)?.len(),
             kind.clone(),
@@ -193,6 +202,13 @@ async fn serve(
     if method == Method::HEAD || size == 0 {
         return Ok(builder.body(Body::empty()).unwrap());
     }
+    let verified = match &source {
+        Source::Preview { ranges, .. } => Some(ranges.clone()),
+        _ => None,
+    };
+    if verified.as_ref().is_some_and(|ranges| verified_read_length(ranges, start, 1) == 0) {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "Preview bytes unavailable".into()));
+    }
     let reader: Box<dyn AsyncRead + Unpin + Send> = match source {
         Source::Torrent(id, index) => {
             let mut r = server
@@ -205,7 +221,7 @@ async fn serve(
                 .map_err(fail)?;
             Box::new(r.take(size))
         }
-        Source::Local(path, _) => {
+        Source::Local(path, _) | Source::Preview { path, .. } => {
             let mut r = tokio::fs::File::open(path).await.map_err(fail)?;
             r.seek(std::io::SeekFrom::Start(start))
                 .await
@@ -217,14 +233,22 @@ async fn serve(
     let mut shutdown = server.shutdown.clone();
     let stream = async_stream::try_stream! {
         let mut reader = reader;
+        let mut offset = start;
         loop {
             if *shutdown.borrow() || !grants.lock().await.contains_key(&token) { break; }
-            let mut buf = vec![0u8; 65536];
+            if offset > end { break; }
+            let wanted = (end - offset + 1).min(65536) as usize;
+            let count = verified.as_ref().map_or(wanted, |ranges| verified_read_length(ranges, offset, wanted));
+            if count == 0 {
+                Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Preview bytes unavailable"))?;
+            }
+            let mut buf = vec![0u8; count];
             let n = tokio::select! {
                 _ = shutdown.wait_for(|stop| *stop) => break,
                 result = reader.read(&mut buf) => result,
             }?;
             if n == 0 { break; }
+            offset += n as u64;
             buf.truncate(n);
             yield Bytes::from(buf);
         }
@@ -233,6 +257,12 @@ async fn serve(
         Box::pin(stream);
     Ok(builder.body(Body::from_stream(stream)).unwrap())
 }
+// Limit each disk read to the current verified island, never across a hole.
+fn verified_read_length(ranges: &[[u64; 2]], offset: u64, wanted: usize) -> usize {
+    ranges.iter().find(|[start, end]| *start <= offset && offset < *end)
+        .map_or(0, |[_, end]| (end - offset).min(wanted as u64) as usize)
+}
+
 pub fn mime(path: &str) -> &'static str {
     match path
         .rsplit('.')
@@ -338,6 +368,47 @@ mod tests {
             .ok();
         session.stop().await;
     }
+    #[tokio::test]
+    async fn preview_reads_verified_islands_and_refuses_holes() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = librqbit::Session::new_with_opts(temp.path().into(), librqbit::SessionOptions {
+            dht: None, disable_trackers: true, disable_local_service_discovery: true,
+            ..Default::default()
+        }).await.unwrap();
+        let media = Media::start(Api::new(session.clone(), None)).await.unwrap();
+        let path = temp.path().join("partial.bin");
+        // Even existing bytes on disk must not be exposed without verification.
+        std::fs::write(&path, b"GOODsecretSAFE").unwrap();
+        let url = media.grant(Source::Preview {
+            id: 99, path, length: 14, ranges: vec![[0, 4], [10, 14]],
+        }).await;
+        let client = reqwest::Client::new();
+        for (range, expected) in [("bytes=0-3", "GOOD"), ("bytes=10-13", "SAFE")] {
+            let response = client.get(&url).header("Range", range).send().await.unwrap();
+            assert_eq!(response.status(), 206);
+            assert_eq!(response.text().await.unwrap(), expected);
+        }
+        let missing = client.get(&url).header("Range", "bytes=4-9").send().await.unwrap();
+        assert_eq!(missing.status(), 503);
+        // Open-ended reads cannot silently turn missing bytes into black frames.
+        let crossing = client.get(&url).header("Range", "bytes=0-").send().await;
+        if let Ok(response) = crossing { assert!(response.bytes().await.is_err()); }
+        media.revoke_torrent(99).await;
+        assert!(!media.authorized(&url).await);
+        media.shutdown().await;
+        session.stop().await;
+    }
+
+    #[test]
+    fn preview_reads_stop_at_verified_boundaries() {
+        let ranges = [[0, 4], [10, 14]];
+        assert_eq!(verified_read_length(&ranges, 2, 65536), 2);
+        assert_eq!(verified_read_length(&ranges, 4, 1), 0);
+        assert_eq!(verified_read_length(&ranges, 9, 2), 0);
+        assert_eq!(verified_read_length(&ranges, 10, 2), 2);
+        assert_eq!(verified_read_length(&ranges, 14, 1), 0);
+    }
+
     #[test]
     fn ranges() {
         assert_eq!(byte_range(Some("bytes=5-9"), 100), Ok((5, 9)));
