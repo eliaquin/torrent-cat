@@ -12,7 +12,14 @@ use std::{
     sync::Mutex,
 };
 static PLAYER: Mutex<Option<Player>> = Mutex::new(None);
-static WINDOW_FIT: Mutex<Option<(NSSize, NSSize)>> = Mutex::new(None);
+static WINDOW_FIT: Mutex<Option<WindowConstraints>> = Mutex::new(None);
+
+#[derive(Clone, Copy)]
+struct WindowConstraints {
+    minimum: NSSize,
+    aspect: NSSize,
+    increments: NSSize,
+}
 
 fn fitted_size(current: NSSize, minimum: NSSize, maximum: NSSize, ratio: f64) -> NSSize {
     let max_width = maximum.width.min(maximum.height * ratio);
@@ -30,9 +37,17 @@ pub fn fit_window(host: usize, width: f64, height: f64) -> Result<Value> {
         let window: *mut AnyObject = msg_send![host, window];
         let mut saved = WINDOW_FIT.lock().unwrap();
         if width == 0.0 || height == 0.0 {
-            if let Some((minimum, aspect)) = saved.take() {
-                let _: () = msg_send![window, setContentAspectRatio: aspect];
-                let _: () = msg_send![window, setContentMinSize: minimum];
+            if let Some(previous) = saved.take() {
+                // A zero getter means "unconstrained", but setting that value
+                // enables an invalid 0:0 constraint. AppKit later computes NaN
+                // geometry during title-bar zoom and aborts. Resize increments
+                // and aspect ratios are mutually exclusive: restore increments
+                // to clear the video ratio, then restore a real ratio if present.
+                let _: () = msg_send![window, setContentResizeIncrements: previous.increments];
+                if previous.aspect.width > 0.0 && previous.aspect.height > 0.0 {
+                    let _: () = msg_send![window, setContentAspectRatio: previous.aspect];
+                }
+                let _: () = msg_send![window, setContentMinSize: previous.minimum];
             }
             return Ok(json!({}));
         }
@@ -43,7 +58,8 @@ pub fn fit_window(host: usize, width: f64, height: f64) -> Result<Value> {
         let mut frame: NSRect = msg_send![window, frame];
         let minimum: NSSize = msg_send![window, contentMinSize];
         let aspect: NSSize = msg_send![window, contentAspectRatio];
-        let (minimum, _) = *saved.get_or_insert((minimum, aspect));
+        let increments: NSSize = msg_send![window, contentResizeIncrements];
+        let minimum = saved.get_or_insert(WindowConstraints { minimum, aspect, increments }).minimum;
         let ratio = width / height;
         if !ratio.is_finite() || ratio <= 0.0 { bail!("Invalid video aspect ratio"); }
         let _: () = msg_send![window, setContentAspectRatio: NSSize::new(ratio, 1.0)];

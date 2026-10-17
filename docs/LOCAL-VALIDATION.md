@@ -88,3 +88,11 @@ This audit establishes the requested local Mac app and researched implementation
 - Playback priority continues to pause other incomplete downloads, but completed seeds remain active. Explicit user pauses and recovery after restart remain covered.
 
 Private torrents require the tracker-issued `.torrent` file. Unknown magnets use an explicit tracker only, without DHT/LSD/PEX; magnets that resolve to private metadata are rejected. Private tracker failover is intentionally disabled until old-peer isolation is implemented. Final announces are bounded, best effort when the tracker is unavailable. Local tests do not establish approval by TD.
+
+## Window zoom after playback — 2026-10-17
+
+- Reproduced the reported AppKit abort with an isolated window: restoring `contentAspectRatio = (0, 0)` after a video ratio makes title-bar zoom calculate a frame with `NaN` height. The zero getter means unconstrained; passing it back to the aspect setter is not a safe reset.
+- Playback cleanup now restores the saved content resize increments, and restores an aspect ratio only when it was positive. The original minimum size is preserved.
+- Added `cargo test --manifest-path src-tauri/Cargo.toml --test window_resize`. It runs the actual Rust window-fitting code on AppKit's main thread using an undisplayed window. It aborted before the fix and passes afterward, covering repeated playback/cleanup/zoom cycles, portrait video, duplicate cleanup, and existing increment/aspect constraints.
+- All three existing window-fitting unit tests pass. The production frontend build and locally signed app bundle succeed.
+- Installed-app check: started VLC playback, returned to the library, then double-clicked the title bar to maximize and restore. Both resize animations completed without a crash. Startup briefly stalled opening an existing torrent file, then recovered without changing the profile.
