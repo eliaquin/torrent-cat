@@ -154,6 +154,10 @@ async fn media_convert(
     jobs::convert(&s.core, id, index, audio).await.map_err(err)
 }
 #[tauri::command]
+async fn media_preview(s: tauri::State<'_, AppState>, id: usize, index: usize, time: f64) -> Cmd<Option<Vec<u8>>> {
+    jobs::preview(&s.core, id, index, time).await.map_err(err)
+}
+#[tauri::command]
 async fn media_poster(s: tauri::State<'_, AppState>, id: usize, index: usize) -> Cmd<String> {
     jobs::poster(&s.core, id, index).await.map_err(err)
 }
@@ -487,6 +491,7 @@ fn main() {
             media_probe,
             media_convert,
             media_poster,
+            media_preview,
             subtitle_file,
             subtitle_embedded,
             create_torrent,
