@@ -307,354 +307,355 @@ function App() {
             className="torrent-list media-shelf"
             aria-label="Torrent library"
           >
-            {!data.tools.vlc && <VlcRecommendation report={report} />}
-            <div className="shelf-toolbar">
-              <div
-                className="shelf-filters"
-                role="group"
-                aria-label="Filter torrents"
-              >
-                {["all", "downloading", "seeding", "paused"].map((f) => (
-                  <button
-                    key={f}
-                    aria-pressed={filter === f}
-                    onClick={() => setFilter(f)}
-                  >
-                    {f[0].toUpperCase() + f.slice(1)}
+            <aside className="library-sidebar">
+              <div className="library-sidebar-label">Library</div>
+              <nav className="shelf-filters" aria-label="Filter torrents">
+                {([
+                  ["all", "video_library", "All torrents"],
+                  ["downloading", "file_download", "Downloading"],
+                  ["seeding", "file_upload", "Seeding"],
+                  ["paused", "pause_circle_outline", "Paused"],
+                ] as const).map(([id, icon, label]) => (
+                  <button key={id} aria-pressed={filter === id}
+                    onClick={() => { setFilter(id); setMore(null); }}>
+                    <Icon name={icon} />
+                    <span>{label}</span>
+                    <span className="library-filter-count">{data.torrents.filter(t =>
+                      id === "all" || status(t) === id || (id === "downloading" && status(t) === "checking")
+                    ).length}</span>
                   </button>
                 ))}
+              </nav>
+              <div className="library-sidebar-footer">
+                <button onClick={() => setPage("create")}><Icon name="note_add" />Create torrent…</button>
               </div>
-              <div className="shelf-actions">
-                <label className="shelf-search">
-                  <Icon name="search" />
-                  <input
-                    aria-label="Search library"
-                    placeholder="Search library"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                  />
-                </label>
-                <Button
-                  icon="add"
-                  className="shelf-primary"
-                  onClick={() => setModal("add")}
-                >
-                  Add torrent
-                </Button>
+            </aside>
+            <div className="library-workspace">
+              <div className="shelf-toolbar">
+                <Button icon="add" onClick={() => setModal("add")}>Add torrent…</Button>
+                <div className="shelf-actions">
+                  <label className="shelf-search">
+                    <Icon name="search" />
+                    <input
+                      aria-label="Search library"
+                      placeholder="Search library"
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                    />
+                  </label>
+                </div>
               </div>
-            </div>
-            {!data.downloadPathExists && (
-              <div className="shelf-warning">
-                <strong>Download folder unavailable</strong>
-                <p>Connect your drive or choose a new download location.</p>
-                <Button onClick={() => setPage("preferences")}>
-                  Choose download folder
-                </Button>
-              </div>
-            )}
-            <div className="shelf-grid">
-              {visible.map((t) => {
-                const st = status(t),
-                  progress = t.stats?.total_bytes
-                    ? Math.min(
-                        100,
-                        (t.stats.progress_bytes / t.stats.total_bytes) * 100,
-                      )
-                    : 0,
-                  selected = expanded === t.id;
-                return (
-                  <article
-                    key={t.info_hash}
-                    className={"torrent " + (selected ? "selected" : "")}
-                  >
-                    <button
-                      className="torrent-cover"
-                      aria-label={"Show files for " + t.name}
-                      aria-expanded={selected}
-                      onClick={() => setExpanded(selected ? null : t.id)}
-                    >
-                      {posters[t.info_hash] ? (
-                        <img src={posters[t.info_hash]} alt="" />
-                      ) : (
-                        <Icon
-                          name={
-                            t.files?.some((f) => isVideo(f.name))
-                              ? "movie"
-                              : "folder"
-                          }
-                        />
-                      )}
-                    </button>
-                    <div className="torrent-body">
-                      <h2 className="name">
-                        <FullName name={t.name || "Getting torrent metadata…"} />
-                      </h2>
-                      <div
-                        className={
-                          "torrent-status " +
-                          (t.stats?.error ? "has-error" : "")
-                        }
-                      >
-                        <strong>{st[0].toUpperCase() + st.slice(1)}</strong>
-                        <span>{progress.toFixed(1)}%</span>
-                        <span>{bytes(t.stats?.total_bytes || 0)}</span>
-                      </div>
-                      <progress
-                        className="ui-progress"
-                        aria-label="Download progress"
-                        value={progress}
-                        max={100}
-                      />
-                      <div className="torrent-transfer">
-                        {t.stats?.error || (
-                          <>
-                            <span>
-                              ↓{" "}
-                              {bytes(
-                                (t.stats?.live?.download_speed?.mbps || 0) *
-                                  1024 *
-                                  1024,
-                              )}
-                              /s
-                            </span>{" "}
-                            ·{" "}
-                            <span>
-                              ↑{" "}
-                              {bytes(
-                                (t.stats?.live?.upload_speed?.mbps || 0) *
-                                  1024 *
-                                  1024,
-                              )}
-                              /s
-                            </span>
-                            <br />
-                            {bytes(t.stats?.progress_bytes || 0)} downloaded
-                          </>
-                        )}
-                      </div>
-                      <div className="torrent-controls">
-                        <Button
-                          icon="play_arrow"
-                          disabled={!t.files?.some((f) => playable(f.name))}
-                          onClick={() => play(t)}
-                        >
-                          Stream
-                        </Button>
-                        {t.stats?.metadata_missing ? (
-                          <Button icon="build" onClick={() => void repairTorrent(t)}>
-                            Repair torrent…
-                          </Button>
-                        ) : (
-                          <Button
-                            icon={st === "paused" ? "play_arrow" : "pause"}
-                            title={
-                              st === "paused"
-                                ? "Resume transfer"
-                                : "Pause transfer"
-                            }
-                            onClick={() =>
-                              void work("Updating transfer…", () =>
-                                invoke("torrent_action", {
-                                  id: t.id,
-                                  action: st === "paused" ? "resume" : "pause",
-                                }),
-                              )
-                            }
-                          />
-                        )}
-                        <Button
-                          icon="list"
-                          title="Show files"
-                          aria-expanded={selected}
-                          onClick={() => setExpanded(selected ? null : t.id)}
-                        />
-                        <div className="more-wrap">
-                          <Button
-                            icon="more_horiz"
-                            title="More actions"
-                            onClick={() => setMore(more === t.id ? null : t.id)}
-                          />
-                          {more === t.id && (
-                            <div className="action-menu">
-                              <button
-                                onClick={() => {
-                                  setMore(null);
-                                  void invoke("reveal_torrent", {
-                                    id: t.id,
-                                  }).catch(report);
-                                }}
-                              >
-                                Show in Finder
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setMore(null);
-                                  void writeText(
-                                    `magnet:?xt=urn:btih:${t.info_hash}&dn=${encodeURIComponent(t.name)}`,
-                                  ).catch(report);
-                                }}
-                              >
-                                Copy magnet link
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setMore(null);
-                                  void exportTorrent(t);
-                                }}
-                              >
-                                Save torrent file…
-                              </button>
-                              <button
-                                disabled={st !== "paused"}
-                                title={
-                                  st === "paused"
-                                    ? "Verify every piece on disk; keep paused"
-                                    : "Pause the transfer before verifying files"
-                                }
-                                onClick={() => {
-                                  setMore(null);
-                                  void invoke("torrent_action", {
-                                    id: t.id,
-                                    action: "recheck",
-                                  }).catch(report);
-                                }}
-                              >
-                                Verify files
-                              </button>
-                              <button
-                                className="danger"
-                                onClick={() => {
-                                  setMore(null);
-                                  setDeleteData(false);
-                                  setRemove(t);
-                                }}
-                              >
-                                Remove…
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                    {selected && (
-                      <div className="torrent-details">
-                        <table>
-                          <tbody>
-                            {t.files?.map((f, i) => (
-                              <tr key={i}>
-                                <td className="col-icon">
-                                  <Icon
-                                    name={
-                                      playable(f.name)
-                                        ? "play_arrow"
-                                        : "insert_drive_file"
-                                    }
-                                  />
-                                </td>
-                                <td className="col-name">
-                                  <button
-                                    className="file-open"
-                                    disabled={!playable(f.name)}
-                                    onClick={() => play(t, i)}
-                                  >
-                                    <FullName name={f.name} />
-                                  </button>
-                                </td>
-                                <td className="col-progress">
-                                  {Math.min(
-                                    100,
-                                    Math.round(
-                                      ((t.stats?.file_progress[i] || 0) /
-                                        Math.max(1, f.length)) *
-                                        100,
-                                    ),
-                                  )}
-                                  %
-                                </td>
-                                <td className="col-size">{bytes(f.length)}</td>
-                                <td className="col-select">
-                                  <input
-                                    type="checkbox"
-                                    aria-label={"Download " + f.name}
-                                    checked={f.included}
-                                    onChange={() =>
-                                      void work("Updating selection…", () =>
-                                        invoke("select_files", {
-                                          id: t.id,
-                                          files: t.files!.flatMap((file, j) =>
-                                            (
-                                              j === i
-                                                ? !file.included
-                                                : file.included
-                                            )
-                                              ? [j]
-                                              : [],
-                                          ),
-                                        }),
-                                      )
-                                    }
-                                  />
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </article>
-                );
-              })}
-            </div>
-            {!visible.length && (
-              <div className="shelf-empty">
-                <Icon
-                  name={data.torrents.length ? "search" : "video_library"}
-                />
-                <h2>
-                  {data.torrents.length
-                    ? "No matching torrents"
-                    : "Your shelf is ready"}
-                </h2>
-                <p>
-                  {data.torrents.length
-                    ? "Try another search or status filter."
-                    : "Add a torrent file or magnet link to start streaming."}
-                </p>
-                {data.torrents.length ? (
-                  <Button
-                    onClick={() => {
-                      setFilter("all");
-                      setQuery("");
-                    }}
-                  >
-                    Clear filters
-                  </Button>
-                ) : (
-                  <div className="empty-actions">
-                    <Button icon="add" onClick={() => setModal("add")}>
-                      Add your first torrent
-                    </Button>
-                    <Button
-                      icon="folder_open"
-                      onClick={() => setModal("import")}
-                    >
-                      Import existing library
+              <div className="library-scroll">
+                {!data.tools.vlc && <VlcRecommendation report={report} />}
+                {!data.downloadPathExists && (
+                  <div className="shelf-warning">
+                    <strong>Download folder unavailable</strong>
+                    <p>Connect your drive or choose a new download location.</p>
+                    <Button onClick={() => setPage("preferences")}>
+                      Choose download folder
                     </Button>
                   </div>
                 )}
+                <div className="shelf-grid">
+                  {visible.map((t) => {
+                    const st = status(t),
+                      progress = t.stats?.total_bytes
+                        ? Math.min(
+                            100,
+                            (t.stats.progress_bytes / t.stats.total_bytes) * 100,
+                          )
+                        : 0,
+                      selected = expanded === t.id;
+                    return (
+                      <article
+                        key={t.info_hash}
+                        className={"torrent " + (selected ? "selected" : "")}
+                      >
+                        <button
+                          className="torrent-cover"
+                          aria-label={"Show files for " + t.name}
+                          aria-expanded={selected}
+                          onClick={() => setExpanded(selected ? null : t.id)}
+                        >
+                          {posters[t.info_hash] ? (
+                            <img src={posters[t.info_hash]} alt="" />
+                          ) : (
+                            <Icon
+                              name={
+                                t.files?.some((f) => isVideo(f.name))
+                                  ? "movie"
+                                  : "folder"
+                              }
+                            />
+                          )}
+                        </button>
+                        <div className="torrent-body">
+                          <h2 className="name">
+                            <FullName name={t.name || "Getting torrent metadata…"} />
+                          </h2>
+                          <div
+                            className={
+                              "torrent-status " +
+                              (t.stats?.error ? "has-error" : "")
+                            }
+                          >
+                            <strong>{st[0].toUpperCase() + st.slice(1)}</strong>
+                            <span>{progress.toFixed(1)}%</span>
+                            <span>{bytes(t.stats?.total_bytes || 0)}</span>
+                          </div>
+                          <progress
+                            className="ui-progress"
+                            aria-label="Download progress"
+                            value={progress}
+                            max={100}
+                          />
+                          <div className="torrent-transfer">
+                            {t.stats?.error || (
+                              <>
+                                <span>
+                                  ↓{" "}
+                                  {bytes(
+                                    (t.stats?.live?.download_speed?.mbps || 0) *
+                                      1024 *
+                                      1024,
+                                  )}
+                                  /s
+                                </span>{" "}
+                                ·{" "}
+                                <span>
+                                  ↑{" "}
+                                  {bytes(
+                                    (t.stats?.live?.upload_speed?.mbps || 0) *
+                                      1024 *
+                                      1024,
+                                  )}
+                                  /s
+                                </span>
+                                <br />
+                                {bytes(t.stats?.progress_bytes || 0)} downloaded
+                              </>
+                            )}
+                          </div>
+                          <div className="torrent-controls">
+                            <Button
+                              icon="play_arrow"
+                              disabled={!t.files?.some((f) => playable(f.name))}
+                              onClick={() => play(t)}
+                            >
+                              Stream
+                            </Button>
+                            {t.stats?.metadata_missing ? (
+                              <Button icon="build" onClick={() => void repairTorrent(t)}>
+                                Repair torrent…
+                              </Button>
+                            ) : (
+                              <Button
+                                icon={st === "paused" ? "play_arrow" : "pause"}
+                                title={
+                                  st === "paused"
+                                    ? "Resume transfer"
+                                    : "Pause transfer"
+                                }
+                                onClick={() =>
+                                  void work("Updating transfer…", () =>
+                                    invoke("torrent_action", {
+                                      id: t.id,
+                                      action: st === "paused" ? "resume" : "pause",
+                                    }),
+                                  )
+                                }
+                              />
+                            )}
+                            <Button
+                              icon="list"
+                              title="Show files"
+                              aria-expanded={selected}
+                              onClick={() => setExpanded(selected ? null : t.id)}
+                            />
+                            <div className="more-wrap">
+                              <Button
+                                icon="more_horiz"
+                                title="More actions"
+                                onClick={() => setMore(more === t.id ? null : t.id)}
+                              />
+                              {more === t.id && (
+                                <div className="action-menu">
+                                  <button
+                                    onClick={() => {
+                                      setMore(null);
+                                      void invoke("reveal_torrent", {
+                                        id: t.id,
+                                      }).catch(report);
+                                    }}
+                                  >
+                                    Show in Finder
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setMore(null);
+                                      void writeText(
+                                        `magnet:?xt=urn:btih:${t.info_hash}&dn=${encodeURIComponent(t.name)}`,
+                                      ).catch(report);
+                                    }}
+                                  >
+                                    Copy magnet link
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setMore(null);
+                                      void exportTorrent(t);
+                                    }}
+                                  >
+                                    Save torrent file…
+                                  </button>
+                                  <button
+                                    disabled={st !== "paused"}
+                                    title={
+                                      st === "paused"
+                                        ? "Verify every piece on disk; keep paused"
+                                        : "Pause the transfer before verifying files"
+                                    }
+                                    onClick={() => {
+                                      setMore(null);
+                                      void invoke("torrent_action", {
+                                        id: t.id,
+                                        action: "recheck",
+                                      }).catch(report);
+                                    }}
+                                  >
+                                    Verify files
+                                  </button>
+                                  <button
+                                    className="danger"
+                                    onClick={() => {
+                                      setMore(null);
+                                      setDeleteData(false);
+                                      setRemove(t);
+                                    }}
+                                  >
+                                    Remove…
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        {selected && (
+                          <div className="torrent-details">
+                            <table>
+                              <tbody>
+                                {t.files?.map((f, i) => (
+                                  <tr key={i}>
+                                    <td className="col-icon">
+                                      <Icon
+                                        name={
+                                          playable(f.name)
+                                            ? "play_arrow"
+                                            : "insert_drive_file"
+                                        }
+                                      />
+                                    </td>
+                                    <td className="col-name">
+                                      <button
+                                        className="file-open"
+                                        disabled={!playable(f.name)}
+                                        onClick={() => play(t, i)}
+                                      >
+                                        <FullName name={f.name} />
+                                      </button>
+                                    </td>
+                                    <td className="col-progress">
+                                      {Math.min(
+                                        100,
+                                        Math.round(
+                                          ((t.stats?.file_progress[i] || 0) /
+                                            Math.max(1, f.length)) *
+                                            100,
+                                        ),
+                                      )}
+                                      %
+                                    </td>
+                                    <td className="col-size">{bytes(f.length)}</td>
+                                    <td className="col-select">
+                                      <input
+                                        type="checkbox"
+                                        aria-label={"Download " + f.name}
+                                        checked={f.included}
+                                        onChange={() =>
+                                          void work("Updating selection…", () =>
+                                            invoke("select_files", {
+                                              id: t.id,
+                                              files: t.files!.flatMap((file, j) =>
+                                                (
+                                                  j === i
+                                                    ? !file.included
+                                                    : file.included
+                                                )
+                                                  ? [j]
+                                                  : [],
+                                              ),
+                                            }),
+                                          )
+                                        }
+                                      />
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+                {!visible.length && (
+                  <div className="shelf-empty">
+                    <Icon
+                      name={data.torrents.length ? "search" : "video_library"}
+                    />
+                    <h2>
+                      {data.torrents.length
+                        ? "No matching torrents"
+                        : "No torrents"}
+                    </h2>
+                    <p>
+                      {data.torrents.length
+                        ? "Try another search or status filter."
+                        : "Add a torrent file or magnet link to start streaming."}
+                    </p>
+                    {data.torrents.length ? (
+                      <Button
+                        onClick={() => {
+                          setFilter("all");
+                          setQuery("");
+                        }}
+                      >
+                        Clear filters
+                      </Button>
+                    ) : (
+                      <div className="empty-actions">
+                        <Button icon="add" onClick={() => setModal("add")}>
+                          Add torrent…
+                        </Button>
+                        <Button
+                          icon="folder_open"
+                          onClick={() => setModal("import")}
+                        >
+                          Import existing library
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
-            )}
-            <div className="torrent-placeholder">
-              Drop a torrent file anywhere or paste a magnet link
+              <footer className="shelf-footer">
+                <span>{visible.length === data.torrents.length
+                  ? `${data.torrents.length} ${data.torrents.length === 1 ? "torrent" : "torrents"}`
+                  : `${visible.length} of ${data.torrents.length} torrents`}</span>
+                <span className="library-drop-hint">Drop torrent files here or paste a magnet link</span>
+              </footer>
             </div>
-            <footer className="shelf-footer">
-              <span>
-                {data.torrents.length}{" "}
-                {data.torrents.length === 1 ? "torrent" : "torrents"} in your
-                library
-              </span>
-              <button onClick={() => setPage("create")}>Create torrent</button>
-            </footer>
           </section>
         ) : page === "preferences" ? (
           <Settings

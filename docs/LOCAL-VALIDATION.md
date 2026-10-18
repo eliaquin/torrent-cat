@@ -96,3 +96,10 @@ Private torrents require the tracker-issued `.torrent` file. Unknown magnets use
 - Added `cargo test --manifest-path src-tauri/Cargo.toml --test window_resize`. It runs the actual Rust window-fitting code on AppKit's main thread using an undisplayed window. It aborted before the fix and passes afterward, covering repeated playback/cleanup/zoom cycles, portrait video, duplicate cleanup, and existing increment/aspect constraints.
 - All three existing window-fitting unit tests pass. The production frontend build and locally signed app bundle succeed.
 - Installed-app check: started VLC playback, returned to the library, then double-clicked the title bar to maximize and restore. Both resize animations completed without a crash. Startup briefly stalled opening an existing torrent file, then recovered without changing the profile.
+
+## Desktop library — 2026-10-17
+
+- Library now matches Preferences with a fixed category sidebar, compact toolbar, smaller card controls and a bottom status bar. Transfer filters show counts; search/filter results show a matching count. Thumbnail, streaming and transfer actions remain available.
+- TypeScript/Vite production build and all four library tests pass. Locally signed macOS bundle builds successfully.
+- Browser validation using the production assets and synthetic snapshot data covers sidebar filtering, search with no results, clearing filters, file expansion, and layouts at 1280×720 and the app minimum of 660×480.
+- Initial native validation was blocked by a Downloads folder permission prompt: macOS TCC logs confirmed that the rebuilt app’s signature did not match the previous grant and triggered a new request. Torrent session restoration waits in filesystem `open` before the UI starts, making the app appear stalled until permission is answered. No download or profile data was modified to work around it. The user subsequently reviewed and approved the installed library layout.
