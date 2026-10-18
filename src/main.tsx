@@ -365,7 +365,8 @@ function App() {
                             (t.stats.progress_bytes / t.stats.total_bytes) * 100,
                           )
                         : 0,
-                      selected = expanded === t.id;
+                      selected = expanded === t.id,
+                      transferLabel = `${st === "paused" ? "Resume" : "Pause"} ${t.stats?.finished ? "seeding" : "downloading"}`;
                     return (
                       <article
                         key={t.info_hash}
@@ -450,12 +451,11 @@ function App() {
                               </Button>
                             ) : (
                               <Button
-                                icon={st === "paused" ? "play_arrow" : "pause"}
-                                title={
-                                  st === "paused"
-                                    ? "Resume transfer"
-                                    : "Pause transfer"
-                                }
+                                icon={st === "paused"
+                                  ? t.stats?.finished ? "file_upload" : "file_download"
+                                  : "pause"}
+                                title={transferLabel}
+                                aria-label={transferLabel}
                                 onClick={() =>
                                   void work("Updating transfer…", () =>
                                     invoke("torrent_action", {
