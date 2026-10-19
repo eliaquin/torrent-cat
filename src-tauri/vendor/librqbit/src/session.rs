@@ -1056,7 +1056,10 @@ impl Session {
                         }
                     }
                 },
-                Some(Ok((live, checked))) = futs.next(), if !futs.is_empty() => {
+                Some(result) = futs.next(), if !futs.is_empty() => {
+                    // A pattern mismatch would disable this select branch until
+                    // another accept, leaving queued handshakes unpolled.
+                    let Ok((live, checked)) = result else { continue };
                     let (addr, kind) = (checked.addr, checked.kind);
                     if let Err(e) = live.add_incoming_peer(checked) {
                         warn!(?addr, ?kind, "error handing over incoming connection: {e:#}");
@@ -2398,6 +2401,106 @@ mod tests {
         .unwrap()
         .into_handle()
         .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rejected_handshake_does_not_stall_already_accepted_peer() {
+        use crate::vectored_traits::AsyncReadVectoredIntoCompat;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+        use tokio::sync::{Mutex, mpsc};
+        use tokio::time::{Duration, timeout};
+
+        struct QueuedAcceptor {
+            incoming: Mutex<mpsc::UnboundedReceiver<(u16, DuplexStream)>>,
+            accepted: mpsc::UnboundedSender<u16>,
+        }
+        impl super::Accept for QueuedAcceptor {
+            const KIND: super::ConnectionKind = super::ConnectionKind::Tcp;
+
+            async fn accept(
+                &self,
+            ) -> anyhow::Result<(
+                std::net::SocketAddr,
+                (
+                    impl crate::vectored_traits::AsyncReadVectored + Send + 'static,
+                    impl tokio::io::AsyncWrite + Unpin + Send + 'static,
+                ),
+            )> {
+                let (port, stream) = self.incoming.lock().await.recv().await.unwrap();
+                self.accepted.send(port).unwrap();
+                let (reader, writer) = tokio::io::split(stream);
+                Ok((
+                    std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                    (reader.into_vectored_compat(), writer),
+                ))
+            }
+        }
+
+        // Cover both a pending accept and a full handshake queue. No third
+        // connection is supplied to wake the listener after the rejection.
+        for capacity in [3, 2] {
+            let (_root, session) = initialization_fixture().await;
+            let torrent = waiting_torrent(&session).await;
+            torrent.wait_until_initialized().await.unwrap();
+            session.unpause(&torrent).await.unwrap();
+            let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+            let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
+            let listener = tokio::spawn(session.clone().task_listener(
+                QueuedAcceptor {
+                    incoming: Mutex::new(incoming_rx),
+                    accepted: accepted_tx,
+                },
+                capacity,
+            ));
+            let (mut rejected, rejected_server) = tokio::io::duplex(4096);
+            let (mut valid, valid_server) = tokio::io::duplex(4096);
+            incoming_tx.send((10001, rejected_server)).unwrap();
+            incoming_tx.send((10002, valid_server)).unwrap();
+            for expected in [10001, 10002] {
+                assert_eq!(
+                    timeout(Duration::from_secs(2), accepted_rx.recv())
+                        .await
+                        .unwrap(),
+                    Some(expected),
+                );
+            }
+            let handshake = |peer_id: &[u8; 20]| {
+                [
+                    &[19][..],
+                    b"BitTorrent protocol",
+                    &[0; 8],
+                    &torrent.info_hash().0,
+                    peer_id,
+                ]
+                .concat()
+            };
+            rejected
+                .write_all(&handshake(&session.peer_id.0))
+                .await
+                .unwrap();
+            assert_eq!(
+                timeout(Duration::from_secs(2), rejected.read(&mut [0]))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0,
+                "the self-connection must be rejected before completing the valid handshake",
+            );
+            let mut peer_id = session.peer_id.0;
+            peer_id[0] ^= 1;
+            valid.write_all(&handshake(&peer_id)).await.unwrap();
+            let mut reply = [0; 68];
+            let result = timeout(Duration::from_secs(2), valid.read_exact(&mut reply)).await;
+            listener.abort();
+            assert!(listener.await.unwrap_err().is_cancelled());
+            drop(valid);
+            session.stop().await;
+            result
+                .expect("a rejected peer must not stall an already accepted peer")
+                .unwrap();
+            assert_eq!(&reply[28..48], &torrent.info_hash().0);
+            assert_eq!(&reply[48..68], &session.peer_id.0);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
