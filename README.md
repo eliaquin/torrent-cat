@@ -7,7 +7,7 @@ A macOS app for downloading and streaming torrents, built with Tauri, Rust, Reac
 - Open torrent files, magnet links with explicit trackers, and torrent URLs.
 - Set TorrentCat as the default app for `.torrent` files and magnet links in Preferences → General.
 - Download, seed, pause, resume and select individual files.
-- Play media while it downloads, with seeking, subtitles and saved playback positions.
+- Play media while it downloads, with seeking, subtitles and saved playback positions. Reopening a torrent returns to its last selected media file, including after an app restart.
 - Hover over the timeline for cached frame previews in both built-in and embedded VLC playback (requires FFmpeg). Previews read only verified downloaded data; unavailable frames show the timestamp, and clicking still seeks and prioritizes that section.
 - Use embedded VLC 3 by default, with built-in playback when VLC is unavailable. Choose a different player in Preferences.
 - Create torrents from a file or folder, including private torrents.
@@ -49,6 +49,8 @@ Preferences, playback positions, torrent state and media caches are stored in:
 
 Downloads use the folder selected in Preferences. Generated media caches currently require manual cleanup.
 
+The last selected media file for each torrent is stored separately in the app webview's local storage. If that storage is unavailable, the selection is remembered for the current app session.
+
 ## Limitations
 
 - Private torrents require the tracker-issued `.torrent` file. They use one tracker, without automatic failover, DHT, peer exchange or local discovery.
@@ -64,7 +66,7 @@ Downloads use the folder selected in Preferences. Generated media caches current
 npm run check   # TypeScript and Rust checks
 npm test        # Rust unit and integration tests
 npm run test:player # Player control visibility tests
-npm run test:library # Library preview selection tests
+npm run test:library # Library previews and last played file selection tests
 npm run build  # Frontend production build
 ```
 

@@ -23,6 +23,7 @@ import { Player } from "./player";
 import { FullName } from "./full-name";
 import "./style.css";
 import { playSound } from "./sound";
+import { createPlaybackSelection } from "./playback-selection";
 const pickTorrent = () =>
   open({
     multiple: true,
@@ -43,6 +44,7 @@ function App() {
     [remove, setRemove] = useState<Torrent | null>(null),
     [deleteData, setDeleteData] = useState(false);
   const [posters, setPosters] = useState<Record<string, string>>({});
+  const [selectPlaybackFile] = useState(() => createPlaybackSelection());
   const [completion, setCompletion] = useState<{ name: string } | null>(null);
   useEffect(() => {
     if (!completion) return;
@@ -100,7 +102,7 @@ function App() {
     setPosters({});
   };
   const play = (t: Torrent, index?: number) => {
-    const i = index ?? t.files?.findIndex((f) => playable(f.name)) ?? -1;
+    const i = selectPlaybackFile(t, index);
     if (i < 0) {
       report("No supported media file found in this torrent.");
       return;
